@@ -31,11 +31,39 @@ worktree, laid out as a labelled **tmux pane** beside the main agent.
 - **Two levels deep, max.** A PR subagent may spawn helper subagents
   (`dispatch_helper`) for focused sub-tasks in its worktree, but helpers cannot
   spawn anything further.
-- **Easy navigation.** `focus_pr_agent` jumps to a pane, `send_to_pr_agent`
-  types follow-up instructions into a running subagent, `list_pr_agents` /
-  `/pr-agents` show every PR's number, name, branch and status.
+- **Check in & control.** `peek_pr_agent` reads a subagent's recent output to see
+  its progress, `stop_pr_agent` interrupts or kills it, `send_to_pr_agent` steers
+  it, `focus_pr_agent` jumps to its pane, and `list_pr_agents` / `/pr-agents`
+  show every PR's number, name, branch and status. PR subagents get the same
+  controls over their own helpers (`list_helpers`, `peek_helper`, `send_to_helper`,
+  `stop_helper`).
+- **Smart intake.** The main agent triages each request: a **one-off** task gets
+  0–2 quick questions then straight to work; a **larger** task triggers planning
+  — it thinks, asks you for detail, and iterates until you converge before
+  dispatching anything.
 - **`/cleanup`** removes worktrees, branches and panes for PRs that have merged
   or closed, and prunes orphaned worktrees.
+
+## Companion packages (recommended)
+
+This package detects and uses these if you install them:
+
+```bash
+pi install npm:pi-ask-user     # ask_user tool — used for triage & planning questions
+pi install npm:pi-simplify     # /simplify — offered per-PR to tidy each diff
+pi install npm:pi-web-access   # web_search / fetch_content — research while planning
+pi install npm:pi-lens         # inline diagnostics + LSP/ast-grep in every worktree
+```
+
+- **pi-ask-user** — the orchestrator prefers `ask_user` for clarifying questions
+  and decisions, and uses it to ask once whether PRs should run `/simplify`.
+- **pi-simplify** — when you opt in, each PR subagent runs `/simplify` on its diff
+  and commits the result before opening the PR (`dispatch_pr({ simplify: true })`,
+  carried to the worker via `PI_PR_SIMPLIFY`).
+- **pi-web-access** — available to the orchestrator and to PR/helper subagents.
+- **pi-lens** — runs at each subagent's `session_start` inside its worktree; no
+  setup needed. The main agent has `edit`/`write` disabled, which does not affect
+  pi-lens at depth 0; subagents keep full tools so pi-lens behaves normally there.
 
 ## Requirements
 
@@ -68,11 +96,14 @@ dispatches a subagent per PR.
 |------|------|---------|
 | main (0) | `dispatch_pr` | Create worktree+branch+pane and hand off one PR |
 | main (0) | `list_pr_agents` | List PRs with number/name/branch/status |
+| main (0) | `peek_pr_agent` | Read a subagent's recent pane output (progress) |
 | main (0) | `focus_pr_agent` | Move tmux focus to a PR's pane |
 | main (0) | `send_to_pr_agent` | Steer / answer a running PR subagent |
+| main (0) | `stop_pr_agent` | Interrupt (Escape) or kill a PR subagent |
 | main (0) | `cleanup_pr_worktrees` | Remove merged/closed PR worktrees |
 | PR (1) | `set_pr_number` | Record the opened PR number (labels the pane) |
 | PR (1) | `dispatch_helper` | Spawn a helper subagent in the same worktree |
+| PR (1) | `list_helpers` / `peek_helper` / `send_to_helper` / `stop_helper` | Monitor & control helpers |
 | helper (2) | — | none (cannot dispatch further) |
 
 Commands: `/cleanup` (`/cleanup dry` to preview), `/pr-agents`.
@@ -99,3 +130,5 @@ the main repo and every worktree, so each agent sees the same set of PRs.
 
 - `PI_PR_ALLOW_MAIN_EDITS=1` — let the main agent keep `edit`/`write` (off by
   default; the orchestrator is meant to delegate, not edit).
+- `PI_PR_DEPTH` / `PI_PR_SIMPLIFY` — set automatically on dispatched subagents;
+  you don't set these by hand.
