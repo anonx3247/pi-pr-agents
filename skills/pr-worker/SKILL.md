@@ -29,7 +29,10 @@ git commit -m "<type>: <concise description>"
 
 1. **Implement** the task, committing atomically as you go.
 2. **Verify**: run the project's tests/build/lint. Fix and re-commit until green.
-3. **Push and open the PR**, according to your mode:
+3. **Simplify (if requested)**: if `PI_PR_SIMPLIFY=1` (the orchestrator opted in),
+   run `/simplify` on your diff to tidy the changed code, then commit the result
+   as its own atomic commit (e.g. `refactor: simplify`). Requires pi-simplify.
+4. **Push and open the PR**, according to your mode:
 
    ### mode = independent  (plain GitHub PR off the base branch)
    ```bash
@@ -58,14 +61,14 @@ git commit -m "<type>: <concise description>"
    `gt create -m "<message>"` per commit instead of raw `git commit`.) See the
    `pr-stacks` skill.
 
-4. **Register the PR number** so your pane and the orchestrator are labelled:
+5. **Register the PR number** so your pane and the orchestrator are labelled:
    ```
    set_pr_number({ number: <the PR number>, url: "<the PR url>" })
    ```
    Get the number/url from the `gh pr create` / `gt submit` output, or
    `gh pr view --json number,url`.
 
-5. **Report back** with a concise summary: branch, PR number/url, the commits you
+6. **Report back** with a concise summary: branch, PR number/url, the commits you
    made, how you verified, and any follow-up PRs you recommend the orchestrator
    split off.
 
@@ -75,7 +78,17 @@ For a focused sub-task you may spawn a helper in this same worktree:
 ```
 dispatch_helper({ name: "review", task: "Review the diff for edge cases and report findings." })
 ```
-Helpers cannot spawn further agents.
+Monitor and steer your helpers just like the orchestrator monitors you:
+`list_helpers`, `peek_helper({id})` (read its progress), `send_to_helper({id, message})`,
+and `stop_helper({id, mode})` (interrupt or kill). Helpers cannot spawn further agents.
+
+## Available companion tools
+
+- **pi-web-access** — `web_search` / `fetch_content` / `code_search` for docs and
+  research while implementing.
+- **pi-lens** — inline diagnostics and LSP/ast-grep navigation; active in this
+  worktree automatically. Heed its feedback.
+- **pi-simplify** — `/simplify` (see step 3 above).
 
 ## Boundaries
 
