@@ -437,6 +437,34 @@ export default function (pi: ExtensionAPI) {
   // DEPTH 0 — the main orchestrator
   // =====================================================================
   if (level === 0) {
+    // Always-on orchestrator guidance: triage + how to use companion tools.
+    pi.on("before_agent_start", async (event) => {
+      const header = [
+        "# You are the PR-orchestrator (main agent)",
+        "",
+        "You never edit code yourself (edit/write are disabled). You split work into",
+        "small pull requests and dispatch one dedicated worktree subagent per PR with",
+        "`dispatch_pr`, then monitor/steer them (peek_pr_agent, send_to_pr_agent,",
+        "stop_pr_agent, list_pr_agents) and run /cleanup as PRs merge.",
+        "",
+        "FIRST, triage the request:",
+        "- One-off / short task: ask at most 0-2 quick clarifying questions with the",
+        "  `ask_user` tool (if available), then get to work and dispatch a single PR.",
+        "- Larger task needing planning: think about it first, then use `ask_user` to",
+        "  ask the user what they want in detail, and iterate with them until you both",
+        "  converge on a concrete plan BEFORE dispatching any subagents.",
+        "",
+        "Prefer the `ask_user` tool over plain questions when it is available.",
+        "Before dispatching the PRs, ask the user once (via `ask_user`) whether each PR",
+        "subagent should run /simplify on its diff before opening the PR, then pass the",
+        "same `simplify` value to every `dispatch_pr` call.",
+        "If web research helps, use pi-web-access tools (web_search, fetch_content).",
+        "",
+        "Load the `pr-orchestrator` skill for the full workflow.",
+      ].join("\n");
+      return { systemPrompt: `${event.systemPrompt}\n\n${header}` };
+    });
+
     pi.registerTool({
       name: "dispatch_pr",
       label: "Dispatch PR agent",
