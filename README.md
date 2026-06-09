@@ -148,20 +148,39 @@ the main repo and every worktree, so each agent sees the same set of PRs.
 - `PI_PR_DEPTH` / `PI_PR_SIMPLIFY` — set automatically on dispatched subagents;
   you don't set these by hand.
 
-## Tests
+## Development
+
+pi loads the `.ts` extension directly, so there is no build step. Contributors
+just need the dev dependencies:
+
+```bash
+npm install
+```
+
+`npm install` also runs the `prepare` script, which registers a **pre-push git
+hook** (via [`simple-git-hooks`](https://github.com/toplenboren/simple-git-hooks))
+that runs the full gate — type-check, lint/format, and tests — before every
+push. If you cloned before the hook existed, register it manually with:
+
+```bash
+npx simple-git-hooks
+```
+
+The same three checks run in CI (`.github/workflows/ci.yml`) on every push and
+pull request:
+
+```bash
+npm run typecheck   # tsc --noEmit
+npm run lint        # biome check .  (lint + format check)
+npm run format      # biome format --write .  (apply formatting)
+npm test            # node:test suite via tsx
+```
 
 The pure, deterministic helpers in `extensions/pr-agents.ts` (slug/quote
 formatting, registry round-trips, shell detection, etc.) are unit-tested with
 Node's built-in test runner (`node:test`), executed straight from TypeScript via
-[`tsx`](https://github.com/privatenumber/tsx) — no build step or heavy test
-framework.
-
-```bash
-npm install
-npm test
-```
-
-Tests live in `tests/` and are excluded from the published npm tarball.
+[`tsx`](https://github.com/privatenumber/tsx) — no heavy test framework. Tests
+live in `tests/` and are excluded from the published npm tarball.
 
 ## Publishing (maintainers)
 

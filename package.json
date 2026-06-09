@@ -34,14 +34,23 @@
     "node": ">=20"
   },
   "scripts": {
-    "test": "tsx --test tests/*.test.ts"
+    "test": "tsx --test tests/*.test.ts",
+    "typecheck": "tsc --noEmit",
+    "lint": "biome check .",
+    "format": "biome format --write .",
+    "prepare": "simple-git-hooks || true"
+  },
+  "simple-git-hooks": {
+    "pre-push": "npm run typecheck && npm run lint && npm test"
   },
   "devDependencies": {
+    "@biomejs/biome": "^1.9.4",
     "@earendil-works/pi-agent-core": "^0.79.0",
     "@earendil-works/pi-ai": "^0.79.0",
     "@earendil-works/pi-coding-agent": "^0.79.0",
     "@earendil-works/pi-tui": "^0.79.0",
     "@types/node": "^20",
+    "simple-git-hooks": "^2.13.1",
     "tsx": "^4",
     "typebox": "^1",
     "typescript": "^5"
@@ -50,8 +59,8 @@
     "access": "public"
   },
   "peerDependencies": {
-    "@earendil-works/pi-ai": "*",
     "@earendil-works/pi-agent-core": "*",
+    "@earendil-works/pi-ai": "*",
     "@earendil-works/pi-coding-agent": "*",
     "@earendil-works/pi-tui": "*",
     "typebox": "*"
