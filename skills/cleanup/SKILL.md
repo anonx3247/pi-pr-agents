@@ -7,7 +7,7 @@ description: Clean up stale git worktrees, branches and tmux panes for PRs that 
 
 Removes the leftovers of finished PR work: worktrees, local branches, and tmux
 panes for PRs that are now **merged** or **closed**, plus any orphaned worktrees
-under the `*.worktrees/` directory.
+under the `<repo>/.worktrees/` directory.
 
 ## How to run
 
@@ -24,7 +24,7 @@ For every PR subagent in the registry:
    - otherwise check whether its branch is merged into the default branch.
 2. If finished: kill its tmux pane, `git worktree remove --force` its worktree,
    delete its local branch, and drop it from the registry.
-3. It then prunes any orphaned `*.worktrees/` directories and runs
+3. It then prunes any orphaned `<repo>/.worktrees/` directories and runs
    `git worktree prune`.
 
 Active PRs (still open, branch not merged) are left untouched and reported.
