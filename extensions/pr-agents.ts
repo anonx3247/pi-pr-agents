@@ -71,6 +71,27 @@ function tryGit(args: string[], cwd: string): string | null {
   }
 }
 
+/**
+ * Run `gh` in `cwd` and return parsed JSON (when the args request `--json`),
+ * the trimmed stdout otherwise, or `null` on any failure (missing gh,
+ * unauthenticated, non-zero exit, or JSON parse error). Never throws, so the
+ * GitHub poller degrades to a silent no-op when gh is unavailable.
+ */
+function runGh(args: string[], cwd: string): unknown {
+  let out: string;
+  try {
+    out = execFileSync("gh", args, { cwd, stdio: "pipe", timeout: 15000 }).toString().trim();
+  } catch {
+    return null;
+  }
+  if (!args.includes("--json")) return out;
+  try {
+    return JSON.parse(out);
+  } catch {
+    return null;
+  }
+}
+
 function tmux(args: string[]): string {
   return execFileSync("tmux", args, { stdio: "pipe", timeout: 10000 }).toString().trim();
 }
@@ -273,8 +294,14 @@ export interface PrEntry {
   simplify?: boolean;
   prNumber?: number;
   prUrl?: string;
+  url?: string;
   status: "working" | "open" | "merged" | "closed" | "stopped";
   createdAt: string;
+  // Set by the worker (depth 1) via `pr_pushed` once the branch is pushed AND
+  // the PR exists. Only then does the orchestrator start polling this entry's
+  // GitHub state — before that the PR may not exist yet, so we make zero gh calls.
+  pushed?: boolean;
+  pushedAt?: string;
   // Set by a PR subagent (depth 1) every time it finishes a turn, so the
   // orchestrator (depth 0) can auto-notify itself of the result. The bridge
   // between the two processes is purely this shared registry file.
@@ -421,6 +448,90 @@ export function buildFinishedNotification(entries: readonly PrEntry[]): string {
     ...blocks,
     "",
     "A PR subagent stopped working. Review its result and decide the next step (peek_pr_agent for more, send_to_pr_agent to steer, /cleanup if merged, or do nothing if it's merely waiting on you). Do not take destructive actions without cause.",
+  ].join("\n");
+}
+
+// ---------------------------------------------------------------------------
+// GitHub state poller → orchestrator cleanup (pure helpers)
+//
+// The orchestrator (depth 0) polls `gh pr view` for each live PR subagent. When
+// a PR transitions to MERGED or CLOSED on GitHub, it auto-notifies itself to run
+// cleanup. Classification and transition selection are kept pure (no gh/exec) so
+// they can be unit-tested without a live session or network.
+// ---------------------------------------------------------------------------
+
+/** A PR's GitHub lifecycle state, as classified from `gh pr view --json`. */
+export type PrStateClass = "merged" | "closed" | "open" | "unknown";
+
+/**
+ * True when the orchestrator should poll this entry's GitHub state: it must be a
+ * PR subagent (depth 1) that has signalled `pr_pushed` (so the PR actually
+ * exists), carry a numeric PR number, and not already be in a terminal state.
+ * Before a worker calls `pr_pushed`, this is false so we make ZERO gh calls.
+ */
+export function isPollable(entry: PrEntry): boolean {
+  return (
+    entry.depth === 1 &&
+    entry.pushed === true &&
+    typeof entry.prNumber === "number" &&
+    entry.status !== "merged" &&
+    entry.status !== "closed" &&
+    entry.status !== "stopped"
+  );
+}
+
+/**
+ * Classify the JSON returned by `gh pr view --json state,mergedAt,closedAt,...`
+ * into a lifecycle state. A non-null `mergedAt` always means merged; otherwise
+ * the textual `state` (gh emits "MERGED"/"CLOSED"/"OPEN") decides. Anything
+ * unrecognized (including null/non-object input) is "unknown".
+ */
+export function classifyPrState(json: unknown): PrStateClass {
+  if (!json || typeof json !== "object") return "unknown";
+  const j = json as { state?: unknown; mergedAt?: unknown };
+  if (j.mergedAt != null) return "merged";
+  const state = typeof j.state === "string" ? j.state.toUpperCase() : "";
+  if (state === "MERGED") return "merged";
+  if (state === "CLOSED") return "closed";
+  if (state === "OPEN") return "open";
+  return "unknown";
+}
+
+/**
+ * From a list of freshly-classified PR entries, select those whose state has
+ * transitioned to a TERMINAL state (merged/closed) that differs from the
+ * last-known state. The last-seen map dedups across polling ticks so each
+ * genuine transition notifies exactly once.
+ */
+export function selectStateTransitions(
+  classified: ReadonlyArray<{ entry: PrEntry; state: PrStateClass }>,
+  lastState: ReadonlyMap<string, string>,
+): { entry: PrEntry; state: "merged" | "closed" }[] {
+  const out: { entry: PrEntry; state: "merged" | "closed" }[] = [];
+  for (const { entry, state } of classified) {
+    if (state !== "merged" && state !== "closed") continue;
+    if (lastState.get(entry.id) === state) continue;
+    out.push({ entry, state });
+  }
+  return out;
+}
+
+/**
+ * Build the orchestrator notification for one or more PRs that just reached a
+ * terminal state on GitHub. Multiple transitions in one tick are combined into a
+ * single message to reduce noise.
+ */
+export function buildCleanupNotification(
+  transitions: ReadonlyArray<{ entry: PrEntry; state: "merged" | "closed" }>,
+): string {
+  const lines = transitions.map(({ entry, state }) => {
+    const pr = entry.prNumber !== undefined ? `#${entry.prNumber}` : "(no number)";
+    return `PR ${pr} '${entry.prName}' (branch ${entry.branch}) was ${state} on GitHub.`;
+  });
+  return [
+    ...lines,
+    "",
+    "Run cleanup now: call cleanup_pr_worktrees to remove its worktree, branch, and tmux window.",
   ].join("\n");
 }
 
@@ -872,6 +983,9 @@ function registerPaneControlTools(pi: ExtensionAPI, cfg: PaneControlConfig): voi
 // ---------------------------------------------------------------------------
 
 const WIDGET_KEY = "pr-agents";
+// Slow poll interval for the GitHub PR-state poller. gh calls are network-bound,
+// so this is much slower than the 2000ms widget refresh tick.
+const GH_POLL_MS = 30000;
 // Braille spinner glyphs pi cycles through while it is "Working".
 const SPINNER_GLYPHS = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏";
 
@@ -956,6 +1070,15 @@ export default function (pi: ExtensionAPI) {
 
   // Timer driving the orchestrator's live PR-agents list widget (depth 0 only).
   let widgetTimer: ReturnType<typeof setInterval> | undefined;
+
+  // Separate, slower timer driving the GitHub PR-state poller (depth 0 only).
+  let ghPollTimer: ReturnType<typeof setInterval> | undefined;
+
+  // Orchestrator-only: last-known GitHub state ("merged"/"closed"/"open") per PR
+  // subagent id. Seeded from the registry at startup (terminal entries marked as
+  // already-seen) so launching the orchestrator never replays a cleanup prompt
+  // for an already merged/closed/stopped PR.
+  const ghLastState = new Map<string, string>();
 
   // Orchestrator-only: last-seen resultSeq per PR subagent id, used to detect
   // and dedup newly-finished agents across refresh ticks. Initialized from the
@@ -1043,13 +1166,58 @@ export default function (pi: ExtensionAPI) {
       tick();
       widgetTimer = setInterval(tick, 2000);
     }
+
+    // Depth 0 with a UI: poll GitHub for each live PR's state on a separate,
+    // slower interval (gh calls are network-bound). When a PR is merged/closed
+    // on GitHub, auto-notify the orchestrator to run cleanup immediately.
+    if (level === 0 && ctx.hasUI && !ghPollTimer) {
+      // Seed last-known state from the registry. Non-pollable entries (not yet
+      // pushed, no number, or already terminal) are skipped so they never
+      // trigger a gh call or a replayed cleanup prompt; pollable entries start
+      // as "open" and are re-classified on the first tick (so a PR that merged
+      // while the orchestrator was down still surfaces as a fresh transition).
+      for (const e of loadRegistry(ctx.cwd)) {
+        if (isPollable(e)) ghLastState.set(e.id, "open");
+      }
+      const ghTick = () => {
+        try {
+          // Classify each pollable PR subagent from a fresh gh read. Entries the
+          // worker has not yet signalled with pr_pushed make zero gh calls.
+          const classified: { entry: PrEntry; state: PrStateClass }[] = [];
+          for (const e of loadRegistry(ctx.cwd)) {
+            if (!isPollable(e)) continue;
+            const json = runGh(["pr", "view", String(e.prNumber), "--json", "state,mergedAt,closedAt,url"], e.worktree);
+            const state = classifyPrState(json);
+            if (state === "unknown") continue; // gh missing/unauth/error — degrade silently
+            classified.push({ entry: e, state });
+          }
+          const transitions = selectStateTransitions(classified, ghLastState);
+          // Record every fresh state (incl. "open") so the map stays current.
+          for (const { entry, state } of classified) ghLastState.set(entry.id, state);
+          if (transitions.length === 0) return;
+          // Persist terminal status so the widget reflects it, then self-notify.
+          for (const { entry, state } of transitions) updateEntry(ctx.cwd, entry.id, { status: state });
+          const msg = buildCleanupNotification(transitions);
+          if (ctx.isIdle()) pi.sendUserMessage(msg);
+          else pi.sendUserMessage(msg, { deliverAs: "followUp" });
+        } catch {
+          // Never let a gh/network/notification failure break the poll loop.
+        }
+      };
+      ghTick();
+      ghPollTimer = setInterval(ghTick, GH_POLL_MS);
+    }
   });
 
-  // Tear down the refresh timer and clear the widget on shutdown.
+  // Tear down the refresh + poll timers and clear the widget on shutdown.
   pi.on("session_shutdown", async (_event, ctx) => {
     if (widgetTimer) {
       clearInterval(widgetTimer);
       widgetTimer = undefined;
+    }
+    if (ghPollTimer) {
+      clearInterval(ghPollTimer);
+      ghPollTimer = undefined;
     }
     if (level === 0 && ctx.hasUI) ctx.ui.setWidget(WIDGET_KEY, undefined);
   });
@@ -1418,6 +1586,41 @@ export default function (pi: ExtensionAPI) {
         });
         if (entry && insideTmux() && entry.paneId) setPaneTitle(entry.paneId, paneTitle(entry));
         return { content: [{ type: "text", text: `Recorded PR #${params.number}.` }] };
+      },
+    });
+
+    registerTextTool(pi, {
+      name: "pr_pushed",
+      label: "Mark PR pushed",
+      description:
+        "Signal that you have pushed your branch AND opened the pull request. Records the PR number/url on your entry and tells the orchestrator to start polling this PR for merge/close (and, later, review comments). Call this as the FINAL step after `git push` + `gh pr create`.",
+      promptGuidelines: [
+        "Use pr_pushed as the final step once the branch is pushed and the PR exists; it registers the number and starts orchestrator polling.",
+      ],
+      parameters: Type.Object({
+        prNumber: Type.Integer({ description: "The pull request number." }),
+        url: Type.Optional(Type.String({ description: "The pull request URL." })),
+      }),
+      async execute(_id, params, _signal, _onUpdate, ctx) {
+        const myId = process.env.PI_PR_ID;
+        if (!myId)
+          return { content: [{ type: "text", text: "PI_PR_ID not set; cannot mark PR as pushed." }], isError: true };
+        const entry = updateEntry(ctx.cwd, myId, {
+          prNumber: params.prNumber,
+          url: params.url,
+          pushed: true,
+          pushedAt: new Date().toISOString(),
+          status: "open",
+        });
+        if (entry && insideTmux() && entry.paneId) setPaneTitle(entry.paneId, paneTitle(entry));
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Marked PR #${params.prNumber} as pushed; the orchestrator will now poll it for merge/close (and, later, review comments).`,
+            },
+          ],
+        };
       },
     });
 
