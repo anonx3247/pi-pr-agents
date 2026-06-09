@@ -1470,6 +1470,18 @@ export default function (pi: ExtensionAPI) {
   // Separate, slower timer driving the GitHub PR-state poller (depth 0 only).
   let ghPollTimer: ReturnType<typeof setInterval> | undefined;
 
+  // Subagent-only (depth 1): timer driving the review-comment loop that polls
+  // THIS PR for new reviewer feedback once it has been pushed.
+  let reviewPollTimer: ReturnType<typeof setInterval> | undefined;
+
+  // Subagent-only (depth 1): in-memory seen-set of review activity ids (keyed
+  // rc:/rv:/ic:) and the resolved owner/repo. The seen-set is seeded from the
+  // entry's persisted seenReviewIds and kept in sync with it (both the poller and
+  // the reply tool union new ids in), so a restart never reprocesses old comments
+  // and the bot's own replies are never re-surfaced as new.
+  const reviewSeen = new Set<string>();
+  let reviewRepo: { owner: string; repo: string } | null = null;
+
   // Orchestrator-only: last-known GitHub state ("merged"/"closed"/"open") per PR
   // subagent id. Seeded from the registry at startup (terminal entries marked as
   // already-seen) so launching the orchestrator never replays a cleanup prompt
@@ -1603,6 +1615,56 @@ export default function (pi: ExtensionAPI) {
       ghTick();
       ghPollTimer = setInterval(ghTick, GH_POLL_MS);
     }
+
+    // Depth 1 (a PR subagent): once THIS PR is pushed, poll it for new reviewer
+    // feedback. When new inline comments arrive, inject a fresh task to address +
+    // push + reply (without resolving threads). The timer fires while the
+    // subagent is IDLE (it finished its task and waits in its hidden window), so
+    // injecting via sendUserMessage starts a clean new turn rather than blocking
+    // the current one.
+    //
+    // KNOWN LIMITATION: this loop only runs while the subagent process is alive.
+    // If its pane was already killed (e.g. by /cleanup), new review comments are
+    // NOT auto-handled — re-spawning dead agents is out of scope.
+    if (level === 1 && !reviewPollTimer) {
+      const reviewTick = () => {
+        try {
+          const myId = process.env.PI_PR_ID;
+          if (!myId) return;
+          const entry = loadRegistry(ctx.cwd).find((e) => e.id === myId);
+          // Entry gone or terminal => nothing to do.
+          if (!entry || entry.status === "merged" || entry.status === "closed" || entry.status === "stopped") return;
+          // Only act once the PR actually exists (pushed + numbered).
+          if (entry.pushed !== true || typeof entry.prNumber !== "number") return;
+
+          // Seed/refresh the in-memory seen-set from the persisted union so a
+          // restart never reprocesses old comments and the reply tool's writes
+          // are picked up.
+          for (const sid of entry.seenReviewIds ?? []) reviewSeen.add(sid);
+
+          // Resolve owner/repo once; gh missing/unauth => skip silently.
+          if (!reviewRepo) reviewRepo = resolveOwnerRepo(ctx.cwd);
+          if (!reviewRepo) return;
+
+          const fetched = fetchReviewActivity(reviewRepo.owner, reviewRepo.repo, entry.prNumber, ctx.cwd);
+          const { actionable, contextNotes, newIds } = selectNewReviewItems(fetched, reviewSeen);
+          // Only surface (and mark seen) when there are NEW actionable comments,
+          // so standalone context lingers until it accompanies real work.
+          if (actionable.length === 0) return;
+          // Mark every surfaced id seen BEFORE injecting so a slow turn can't
+          // double-surface them on the next tick.
+          for (const nid of newIds) reviewSeen.add(nid);
+          mergeSeenReviewIds(ctx.cwd, myId, newIds);
+          const msg = buildReviewTask(actionable, contextNotes, entry.prNumber);
+          if (ctx.isIdle()) pi.sendUserMessage(msg);
+          else pi.sendUserMessage(msg, { deliverAs: "followUp" });
+        } catch {
+          // Never let a gh/network/notification failure break the poll loop.
+        }
+      };
+      reviewTick();
+      reviewPollTimer = setInterval(reviewTick, REVIEW_POLL_MS);
+    }
   });
 
   // Tear down the refresh + poll timers and clear the widget on shutdown.
@@ -1614,6 +1676,10 @@ export default function (pi: ExtensionAPI) {
     if (ghPollTimer) {
       clearInterval(ghPollTimer);
       ghPollTimer = undefined;
+    }
+    if (reviewPollTimer) {
+      clearInterval(reviewPollTimer);
+      reviewPollTimer = undefined;
     }
     if (level === 0 && ctx.hasUI) ctx.ui.setWidget(WIDGET_KEY, undefined);
   });
@@ -2055,6 +2121,57 @@ export default function (pi: ExtensionAPI) {
             isError: true,
           };
         }
+      },
+    });
+
+    registerTextTool(pi, {
+      name: "reply_to_review_comment",
+      label: "Reply to review comment",
+      description:
+        "Post an inline reply to a reviewer's comment thread on THIS PR (a short explanation of your fix or a clarifying question). Use after addressing the feedback in code and pushing. This does NOT resolve the thread — leave that to the reviewer.",
+      promptGuidelines: [
+        "Use reply_to_review_comment to reply to each inline review thread after addressing it; never resolve threads yourself.",
+      ],
+      parameters: Type.Object({
+        commentId: Type.Integer({ description: "The numeric id of the inline review comment (from `rc:<id>`)." }),
+        body: Type.String({ description: "Short reply: how you addressed it, or a clarifying question." }),
+      }),
+      async execute(_id, params, _signal, _onUpdate, ctx) {
+        const myId = process.env.PI_PR_ID;
+        if (!myId) return { content: [{ type: "text", text: "PI_PR_ID not set; cannot reply." }], isError: true };
+        const entry = loadRegistry(ctx.cwd).find((e) => e.id === myId);
+        if (!entry || typeof entry.prNumber !== "number") {
+          return {
+            content: [{ type: "text", text: "No pushed PR on record yet; open the PR (pr_pushed) first." }],
+            isError: true,
+          };
+        }
+        const repo = reviewRepo ?? resolveOwnerRepo(ctx.cwd);
+        if (!repo) {
+          return {
+            content: [{ type: "text", text: "Could not resolve owner/repo via gh (missing/unauthenticated?)." }],
+            isError: true,
+          };
+        }
+        reviewRepo = repo;
+        const replyId = postReviewReply(repo.owner, repo.repo, entry.prNumber, params.commentId, params.body, ctx.cwd);
+        if (replyId === null) {
+          return {
+            content: [{ type: "text", text: `Failed to post reply to comment ${params.commentId} (gh error).` }],
+            isError: true,
+          };
+        }
+        // Record our own reply id so the poller never treats it as a new comment.
+        reviewSeen.add(`rc:${replyId}`);
+        mergeSeenReviewIds(ctx.cwd, myId, [`rc:${replyId}`]);
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Replied to comment ${params.commentId} (reply id ${replyId}). Thread left unresolved.`,
+            },
+          ],
+        };
       },
     });
 
