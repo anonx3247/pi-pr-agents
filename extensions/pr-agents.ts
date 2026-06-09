@@ -308,6 +308,12 @@ export interface PrEntry {
   lastResult?: string;
   lastResultAt?: string;
   resultSeq?: number;
+  // Set by a PR subagent (depth 1) review poller + reply tool: the set of review
+  // activity ids already surfaced/handled, keyed distinctly (rc:<id> inline
+  // comments, rv:<...> review summaries, ic:<...> issue comments). Persisted as a
+  // UNION so a restart never reprocesses old comments and the bot's own replies
+  // (recorded here immediately) are never re-surfaced as new.
+  seenReviewIds?: string[];
 }
 
 export function registryPath(cwd: string): string {
