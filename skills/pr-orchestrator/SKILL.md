@@ -55,6 +55,15 @@ the PR. Remember the answer and pass the same `simplify: true|false` to **every*
    - **stacked** — depends on a previous PR (see the `pr-stacks` skill for manual
      stacks vs Graphite, and the `gt-graphite` skill for the `gt` workflow).
 
+   **Before stacking dependent PRs, consult the project stacking strategy.** Its
+   current value is shown at the top of your orchestrator context (`PR stacking
+   strategy: …`). If it is **not set**, run `/pr-strategy` (which prompts the user
+   to choose github vs graphite and persists the choice to `.pi/pr-agents.json`).
+   Then dispatch dependent PRs with `mode: "stack"` when the strategy is
+   **github** (manual stacked GitHub PRs) or `mode: "graphite"` when it is
+   **graphite** (a `gt` stack). Standalone PRs always use `mode: "independent"`,
+   regardless of the strategy. An explicit mode the user requests always wins.
+
 3. **Confirm the plan** with the user (a short ordered list of PR titles).
 
 4. **Dispatch one subagent per PR** with `dispatch_pr`:

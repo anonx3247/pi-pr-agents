@@ -19,6 +19,14 @@ giant PR. Two strategies are supported.
 The orchestrator encodes this per PR via `dispatch_pr({ mode })`:
 `"graphite"` or `"stack"` (vs `"independent"`).
 
+**Project default:** the choice between the manual-GitHub-stack path and the
+Graphite path can be recorded once per project with the `/pr-strategy` command
+(`/pr-strategy github` or `/pr-strategy graphite`, or run it with no argument to
+be prompted). It is stored in `<repo-root>/.pi/pr-agents.json` and only sets the
+**default mode for stacking dependent PRs** — `github` → `mode:"stack"`,
+`graphite` → `mode:"graphite"`. Standalone PRs stay `independent`, and an
+explicit `mode` passed to `dispatch_pr` always wins over the project default.
+
 ## Manual GitHub stack
 
 Dispatch PRs **in order**. Each one branches off the previous one's branch and
