@@ -1,0 +1,57 @@
+{
+  "$schema": "https://biomejs.dev/schemas/1.9.4/schema.json",
+  "files": {
+    // Only our TypeScript source is linted/formatted. package.json and the
+    // lockfile are left to npm so the two tools don't fight over JSON layout.
+    "include": ["extensions/**/*.ts", "tests/**/*.ts"],
+    "ignore": ["node_modules", "**/*.worktrees/**", "**/*.html", "**/dist/**"]
+  },
+  "vcs": {
+    "enabled": true,
+    "clientKind": "git",
+    "useIgnoreFile": true
+  },
+  "formatter": {
+    "enabled": true,
+    "indentStyle": "space",
+    "indentWidth": 2,
+    "lineWidth": 120
+  },
+  "organizeImports": {
+    "enabled": true
+  },
+  "javascript": {
+    "formatter": {
+      "quoteStyle": "double",
+      "semicolons": "always"
+    }
+  },
+  "linter": {
+    "enabled": true,
+    "rules": {
+      "recommended": true,
+      "style": {
+        // The dispatch/worker message blocks are built as arrays of backtick
+        // strings where most lines interpolate values. A few lines are static,
+        // but keeping every line a template literal makes those blocks uniform
+        // and easy to edit, so we don't force them to plain quotes here.
+        "noUnusedTemplateLiteral": "off"
+      }
+    }
+  },
+  "overrides": [
+    {
+      "include": ["tests/**/*.ts"],
+      "linter": {
+        "rules": {
+          "performance": {
+            // The tests unset process.env keys with `delete`, which is the only
+            // correct way to remove an env var. noDelete's autofix would rewrite
+            // it to `process.env.KEY = undefined`, setting the string "undefined".
+            "noDelete": "off"
+          }
+        }
+      }
+    }
+  ]
+}
