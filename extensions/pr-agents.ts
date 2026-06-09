@@ -419,6 +419,9 @@ function buildWorkerCommand(entry: PrEntry, task: string): string {
     PI_PR_SIMPLIFY: entry.simplify ? "1" : "0",
   });
   const flags = [
+    // Trust project-local files for this run (dispatched worktree of a repo the
+    // user already chose to work in).
+    "-a",
     "--name",
     shq(`PR: ${entry.prName}`),
   ];
@@ -436,7 +439,7 @@ function buildHelperCommand(parentId: string, name: string, task: string): strin
     PI_PR_ID: parentId,
     PI_PR_HELPER: name,
   });
-  const flags = ["--name", shq(`helper: ${name}`)];
+  const flags = ["-a", "--name", shq(`helper: ${name}`)];
   if (fs.existsSync(HELPER_PROMPT)) {
     flags.push("--append-system-prompt", shq(HELPER_PROMPT));
   }
@@ -723,6 +726,17 @@ function registerPaneControlTools(pi: ExtensionAPI, cfg: PaneControlConfig): voi
 
 export default function (pi: ExtensionAPI) {
   const level = depth();
+
+  // Dispatched PR/helper subagents run in a worktree of a repo the user already
+  // chose to work in, so auto-trust it instead of blocking on the trust prompt.
+  // (Only fires for user/global and CLI extensions; the worker/helper commands
+  // also pass `-a` to cover other load modes.)
+  pi.on("project_trust", async (_event, _ctx) => {
+    if (process.env.PI_PR_DEPTH && process.env.PI_PR_DEPTH !== "0") {
+      return { trusted: "yes" } as const;
+    }
+    return { trusted: "undecided" } as const;
+  });
 
   // ---- Common: tidy tmux titles when we're inside tmux ----------------
   pi.on("session_start", async (_event, ctx) => {
