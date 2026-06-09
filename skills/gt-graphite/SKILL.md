@@ -274,10 +274,14 @@ branches checked out in other worktrees**, so cross-branch restacking after a
 lower PR changes is coordinated by the **main agent's** `gt submit --stack`, not
 by the worker.
 
-> **Open design question (out of scope for this docs PR):** `mode: "graphite"`
-> already exists on `dispatch_pr` (the GitHub modes are `independent`/`stack`).
-> Whether to add a project-level stored setting (e.g. in `project/.pi`) that
-> selects GitHub vs Graphite and prompts the user is a reasonable follow-up.
+> **Project stacking strategy:** `mode: "graphite"` already exists on
+> `dispatch_pr` (the GitHub modes are `independent`/`stack`). The default used
+> when the orchestrator stacks *dependent* PRs is now stored per project in
+> `<repo-root>/.pi/pr-agents.json` and chosen with the `/pr-strategy` command
+> (`/pr-strategy github` → `mode:"stack"`, `/pr-strategy graphite` →
+> `mode:"graphite"`; run it with no argument to be prompted, and `graphite` is
+> only offered when `gt` is installed). Standalone PRs stay `independent`, and an
+> explicit `mode` passed to `dispatch_pr` always wins over the stored strategy.
 
 **Non-interactive note:** in automated/subagent contexts always pass
 `--no-interactive` (or `--quiet`) and avoid commands that need an interactive
