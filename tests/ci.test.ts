@@ -24,9 +24,7 @@ describe("selectNewCiFailures", () => {
   });
 
   test("carries name/state/link onto each failure", () => {
-    const checks: CiCheck[] = [
-      check({ name: "build", state: "cancelled", bucket: "fail", link: "https://gh/run/9" }),
-    ];
+    const checks: CiCheck[] = [check({ name: "build", state: "cancelled", bucket: "fail", link: "https://gh/run/9" })];
     const sel = selectNewCiFailures(checks, "sha", new Set());
     const f: CiFailure = sel.failures[0];
     assert.equal(f.name, "build");
