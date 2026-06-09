@@ -35,7 +35,7 @@ const HELPER_PROMPT = path.join(PKG_ROOT, "assets", "helper-system.md");
 // Small helpers
 // ---------------------------------------------------------------------------
 
-function depth(): number {
+export function depth(): number {
   const n = Number.parseInt(process.env.PI_PR_DEPTH ?? "0", 10);
   return Number.isFinite(n) ? n : 0;
 }
@@ -44,11 +44,11 @@ function insideTmux(): boolean {
   return Boolean(process.env.TMUX);
 }
 
-function shq(s: string): string {
+export function shq(s: string): string {
   return `'${s.replace(/'/g, "'\\''")}'`;
 }
 
-function slugify(s: string): string {
+export function slugify(s: string): string {
   return (
     s
       .toLowerCase()
@@ -91,7 +91,7 @@ function gitCommonDir(cwd: string): string {
   return path.resolve(cwd, d);
 }
 
-function defaultBranch(cwd: string): string {
+export function defaultBranch(cwd: string): string {
   const head = tryGit(["symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"], cwd);
   if (head) return head.replace(/^origin\//, "");
   for (const b of ["main", "master"]) {
@@ -147,9 +147,9 @@ function saveState(patch: Partial<UserState>): void {
 const ALIAS_BEGIN = "# >>> pi-pr-agents tmux wrapper >>>";
 const ALIAS_END = "# <<< pi-pr-agents tmux wrapper <<<";
 
-type ShellKind = "zsh" | "bash" | "fish" | "unknown";
+export type ShellKind = "zsh" | "bash" | "fish" | "unknown";
 
-function detectShell(): ShellKind {
+export function detectShell(): ShellKind {
   const s = (process.env.SHELL ?? "").toLowerCase();
   if (s.includes("zsh")) return "zsh";
   if (s.includes("bash")) return "bash";
@@ -171,7 +171,7 @@ function shellRcPath(kind: ShellKind): string | undefined {
   }
 }
 
-function aliasBlock(kind: ShellKind): string {
+export function aliasBlock(kind: ShellKind): string {
   if (kind === "fish") {
     return [
       ALIAS_BEGIN,
@@ -259,7 +259,7 @@ function installTmuxAlias(): InstallResult {
 // Registry (shared across worktrees)
 // ---------------------------------------------------------------------------
 
-interface PrEntry {
+export interface PrEntry {
   id: string;
   prName: string;
   branch: string;
@@ -276,13 +276,13 @@ interface PrEntry {
   createdAt: string;
 }
 
-function registryPath(cwd: string): string {
+export function registryPath(cwd: string): string {
   const dir = path.join(gitCommonDir(cwd), "pi-pr-agents");
   fs.mkdirSync(dir, { recursive: true });
   return path.join(dir, "registry.json");
 }
 
-function loadRegistry(cwd: string): PrEntry[] {
+export function loadRegistry(cwd: string): PrEntry[] {
   try {
     const raw = fs.readFileSync(registryPath(cwd), "utf8");
     const parsed = JSON.parse(raw);
@@ -292,11 +292,11 @@ function loadRegistry(cwd: string): PrEntry[] {
   }
 }
 
-function saveRegistry(cwd: string, entries: PrEntry[]): void {
+export function saveRegistry(cwd: string, entries: PrEntry[]): void {
   fs.writeFileSync(registryPath(cwd), JSON.stringify(entries, null, 2));
 }
 
-function updateEntry(cwd: string, id: string, patch: Partial<PrEntry>): PrEntry | undefined {
+export function updateEntry(cwd: string, id: string, patch: Partial<PrEntry>): PrEntry | undefined {
   const entries = loadRegistry(cwd);
   const idx = entries.findIndex((e) => e.id === id);
   if (idx === -1) return undefined;
@@ -305,7 +305,7 @@ function updateEntry(cwd: string, id: string, patch: Partial<PrEntry>): PrEntry 
   return entries[idx];
 }
 
-function findEntry(entries: PrEntry[], ref: string): PrEntry | undefined {
+export function findEntry(entries: PrEntry[], ref: string): PrEntry | undefined {
   return entries.find(
     (e) =>
       e.id === ref ||
@@ -326,7 +326,7 @@ function tmuxSetup(): void {
   tryTmux(["set", "-g", "pane-border-format", " #{pane_title} "]);
 }
 
-function paneTitle(entry: Pick<PrEntry, "prNumber" | "prName" | "branch">): string {
+export function paneTitle(entry: Pick<PrEntry, "prNumber" | "prName" | "branch">): string {
   const tag = entry.prNumber !== undefined ? `PR#${entry.prNumber}` : "PR";
   return `${tag} ${entry.prName} (${entry.branch})`;
 }
@@ -451,7 +451,7 @@ function worktreesDir(cwd: string): string {
   return path.join(path.dirname(root), `${name}.worktrees`);
 }
 
-function uniqueBranch(cwd: string, desired: string): string {
+export function uniqueBranch(cwd: string, desired: string): string {
   let branch = desired;
   let i = 2;
   while (tryGit(["rev-parse", "--verify", "--quiet", branch], cwd) !== null) {
