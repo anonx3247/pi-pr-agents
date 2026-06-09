@@ -24,6 +24,7 @@ import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { StringEnum } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ToolDefinition } from "@earendil-works/pi-coding-agent";
+import { truncateToWidth } from "@earendil-works/pi-tui";
 import { type TSchema, Type } from "typebox";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -760,11 +761,94 @@ function registerPaneControlTools(pi: ExtensionAPI, cfg: PaneControlConfig): voi
 }
 
 // ---------------------------------------------------------------------------
+// PR-agents list widget (orchestrator only)
+// ---------------------------------------------------------------------------
+
+const WIDGET_KEY = "pr-agents";
+// Braille spinner glyphs pi cycles through while it is "Working".
+const SPINNER_GLYPHS = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏";
+
+/**
+ * True when a pane's recent output shows pi actively working: the braille
+ * spinner, or an activity line ("Working" / "Esc to interrupt"). Pure so it can
+ * be unit-tested without tmux.
+ */
+export function isWorkingSnapshot(snapshot: string | null): boolean {
+  if (!snapshot) return false;
+  const tail = snapshot.split("\n").slice(-6).join("\n");
+  if ([...SPINNER_GLYPHS].some((g) => tail.includes(g))) return true;
+  return /esc to interrupt/i.test(tail) || /\bWorking\b/.test(tail);
+}
+
+type MarkerColor = "success" | "warning" | "dim" | "error";
+interface StatusMarker {
+  icon: string;
+  color: MarkerColor;
+  label: string;
+}
+
+/**
+ * Derive the status marker (icon + theme color + label) for one PR agent from
+ * its registry status plus live pane state. Terminal registry states
+ * (merged/closed) win; otherwise liveness and the working spinner decide.
+ * Pure so it can be unit-tested.
+ */
+export function statusMarker(status: PrEntry["status"], alive: boolean, working: boolean): StatusMarker {
+  if (status === "merged") return { icon: "✓", color: "success", label: "merged" };
+  if (status === "closed") return { icon: "✗", color: "error", label: "closed" };
+  if (!alive) return { icon: "■", color: "dim", label: status === "stopped" ? "stopped" : "ended" };
+  if (working) return { icon: "●", color: "success", label: "working" };
+  return { icon: "○", color: "warning", label: "idle" };
+}
+
+/**
+ * Latest commit title in a PR worktree, or "(no commits yet)" when the branch
+ * has no commits beyond its base. Falls back safely if git fails.
+ */
+function latestCommitTitle(worktree: string, base: string): string {
+  const count = tryGit(["rev-list", "--count", `${base}..HEAD`], worktree);
+  if (count !== null && count.trim() === "0") return "(no commits yet)";
+  const title = tryGit(["log", "-1", "--format=%s"], worktree);
+  return title && title.length > 0 ? title : "(no commits yet)";
+}
+
+interface WidgetTheme {
+  fg(color: string, text: string): string;
+}
+
+/**
+ * Build the widget's lines for the current registry. Returns `undefined` when
+ * there are no PR agents (so the caller clears the widget). Reads live pane and
+ * git state; everything degrades gracefully if tmux/git calls fail.
+ */
+function renderPrWidget(cwd: string, theme: WidgetTheme, width: number): string[] | undefined {
+  const entries = loadRegistry(cwd).filter((e) => e.depth === 1);
+  if (entries.length === 0) return undefined;
+
+  const cap = Math.max(20, width - 1);
+  const lines: string[] = [theme.fg("accent", `● PR agents (${entries.length})`)];
+  for (const e of entries) {
+    const alive = paneAlive(e.paneId);
+    const working = alive && isWorkingSnapshot(capturePane(e.paneId, 8));
+    const m = statusMarker(e.status, alive, working);
+    const pr = e.prNumber !== undefined ? `PR #${e.prNumber} ${e.status}` : "pending";
+    const head = `${theme.fg(m.color, m.icon)} ${theme.fg(m.color, m.label.padEnd(7))} ${e.id}  ${pr}  ${e.prName}`;
+    lines.push(truncateToWidth(head, cap));
+    const sub = `    ${e.branch} · ${latestCommitTitle(e.worktree, e.base)}`;
+    lines.push(truncateToWidth(theme.fg("dim", sub), cap, ""));
+  }
+  return lines;
+}
+
+// ---------------------------------------------------------------------------
 // Extension entry point
 // ---------------------------------------------------------------------------
 
 export default function (pi: ExtensionAPI) {
   const level = depth();
+
+  // Timer driving the orchestrator's live PR-agents list widget (depth 0 only).
+  let widgetTimer: ReturnType<typeof setInterval> | undefined;
 
   // Dispatched PR/helper subagents run in a worktree of a repo the user already
   // chose to work in, so auto-trust it instead of blocking on the trust prompt.
@@ -810,6 +894,32 @@ export default function (pi: ExtensionAPI) {
         saveState({ aliasPrompted: true });
       }
     }
+
+    // Depth 0 with a UI: render a persistent, auto-refreshing list of the
+    // dispatched PR agents above the editor (status marker + latest commit).
+    if (level === 0 && ctx.hasUI && !widgetTimer) {
+      const tick = () => {
+        try {
+          const width = process.stdout.columns ?? 100;
+          const lines = renderPrWidget(ctx.cwd, ctx.ui.theme, width);
+          ctx.ui.setWidget(WIDGET_KEY, lines);
+        } catch {
+          // tmux/git failures already degrade to null inside renderPrWidget;
+          // never let the refresh loop throw.
+        }
+      };
+      tick();
+      widgetTimer = setInterval(tick, 2000);
+    }
+  });
+
+  // Tear down the refresh timer and clear the widget on shutdown.
+  pi.on("session_shutdown", async (_event, ctx) => {
+    if (widgetTimer) {
+      clearInterval(widgetTimer);
+      widgetTimer = undefined;
+    }
+    if (level === 0 && ctx.hasUI) ctx.ui.setWidget(WIDGET_KEY, undefined);
   });
 
   // Manual (re)install command, available everywhere.
