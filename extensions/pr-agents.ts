@@ -351,6 +351,84 @@ export function findEntry(entries: PrEntry[], ref: string): PrEntry | undefined 
 }
 
 // ---------------------------------------------------------------------------
+// simplify_diff (pure helpers)
+//
+// These reproduce pi-simplify's behavior without bouncing through its
+// /simplify slash command (which would deadlock an autonomous worker that
+// stays in-turn). They mirror pi-simplify's git-diff.ts (parseDiffOutput) and
+// prompt-builder.ts (buildSimplifyPrompt) so the worker can simplify inline.
+// ---------------------------------------------------------------------------
+
+export type ChangedFileStatus = "modified" | "added" | "renamed" | "copied";
+
+export interface ChangedFile {
+  path: string;
+  status: ChangedFileStatus;
+}
+
+const SIMPLIFY_STATUS_MAP: Record<string, ChangedFileStatus> = {
+  M: "modified",
+  A: "added",
+  R: "renamed",
+  C: "copied",
+};
+
+/**
+ * Parse `git diff --name-status` output into {path, status}[].
+ * Mirrors pi-simplify's parseDiffOutput: renamed (R100\told\tnew) and copied
+ * (C100\told\tnew) lines carry two paths — use the NEW path (3rd tab field).
+ */
+export function parseChangedFiles(stdout: string): ChangedFile[] {
+  const files: ChangedFile[] = [];
+  for (const line of stdout.split("\n")) {
+    if (!line.trim()) continue;
+    const parts = line.split("\t");
+    const statusCode = parts[0]?.[0];
+    if (!statusCode) continue;
+    const status = SIMPLIFY_STATUS_MAP[statusCode];
+    if (!status) continue;
+    const path = status === "renamed" || status === "copied" ? parts[2] : parts[1];
+    if (path) files.push({ path, status });
+  }
+  return files;
+}
+
+/**
+ * Build the simplification prompt. Reproduces pi-simplify's prompt-builder.ts
+ * template verbatim (Principles / Scope / Process), then appends a worker-flow
+ * instruction so the worker applies the changes INLINE in the same turn and
+ * commits them, rather than waiting for any separate command.
+ */
+export function buildSimplifyPrompt(files: readonly ChangedFile[]): string {
+  const fileList = files.map((f) => `- ${f.path} (${f.status})`).join("\n");
+  return `Review the following recently changed files and apply simplification improvements.
+
+## Principles
+
+- **Preserve functionality**: Never change what the code does. All existing tests must continue to pass.
+- **Apply project standards**: Follow any conventions from CLAUDE.md or AGENTS.md in this project.
+- **Enhance clarity**: Reduce unnecessary complexity and nesting, eliminate redundant code and abstractions, improve variable and function names, consolidate related logic, remove unnecessary comments that describe obvious code. Avoid nested ternary operators: prefer switch statements or if/else chains for multiple conditions.
+- **Maintain balance**: Do not over-simplify. Avoid overly clever solutions that are hard to understand. Do not combine too many concerns into single functions. Do not remove helpful abstractions. Prioritize readability over fewer lines.
+
+## Scope
+
+Only review and modify these files:
+${fileList}
+
+## Process
+
+1. Read each file listed above
+2. Identify concrete improvements (dead code, unclear names, redundant logic, inconsistent patterns)
+3. Apply changes one file at a time
+4. After all changes, run existing tests to verify nothing is broken
+5. Summarize what you changed and why
+
+Do NOT add new features, change public APIs, or refactor code outside the listed files.
+
+After applying these simplifications and verifying tests pass, commit the result as a single atomic \`refactor: simplify\` commit, then continue to push and open/update the PR. Do not wait for any separate command — apply the changes now, in this turn.`;
+}
+
+// ---------------------------------------------------------------------------
 // agent_end → orchestrator notification (pure helpers)
 //
 // When a PR subagent (depth 1) finishes a turn, it records its final result on
@@ -1255,7 +1333,7 @@ export default function (pi: ExtensionAPI) {
         "",
         "Prefer the `ask_user` tool over plain questions when it is available.",
         "Before dispatching the PRs, ask the user once (via `ask_user`) whether each PR",
-        "subagent should run /simplify on its diff before opening the PR, then pass the",
+        "subagent should simplify its diff (via the simplify_diff tool) before opening the PR, then pass the",
         "same `simplify` value to every `dispatch_pr` call.",
         "If web research helps, use pi-web-access tools (web_search, fetch_content).",
         "",
@@ -1300,7 +1378,7 @@ export default function (pi: ExtensionAPI) {
         simplify: Type.Optional(
           Type.Boolean({
             description:
-              "If true, the subagent runs /simplify on its diff and commits the result before opening the PR (requires pi-simplify). Ask the user once up front, then pass the same value to every dispatch_pr.",
+              "If true, the subagent calls the simplify_diff tool to get an inline simplification task for its diff, applies it, and commits the result before opening the PR (requires pi-simplify). Ask the user once up front, then pass the same value to every dispatch_pr.",
           }),
         ),
       }),
@@ -1374,7 +1452,7 @@ export default function (pi: ExtensionAPI) {
           ``,
           `Follow the pr-worker skill. Make an atomic commit after every coherent change.${
             entry.simplify
-              ? " Before opening the PR, call the simplify_diff tool to run /simplify on your diff, then commit the result."
+              ? " Before opening the PR, call the simplify_diff tool to get an inline simplification task for your diff, apply it in the same turn, then commit the result as a `refactor: simplify` commit."
               : ""
           } When you open the PR, call set_pr_number so this pane gets labelled.`,
         ].join("\n");
@@ -1628,28 +1706,31 @@ export default function (pi: ExtensionAPI) {
       name: "simplify_diff",
       label: "Simplify diff",
       description:
-        "Run pi-simplify's /simplify on your current branch diff to tidy the changed code before opening the PR. An autonomous agent cannot invoke a slash command directly, so this tool queues /simplify to run in your own session right after this turn. When it completes, review the changes and commit them as an atomic 'refactor: simplify' commit. Typically used when the orchestrator requested simplification (PI_PR_SIMPLIFY=1).",
+        "Return an inline simplification task for this PR's diff (changed files + pi-simplify's guidance) so you can tidy the changed code before opening the PR. The task is returned as the tool RESULT — apply the simplifications in the SAME turn, run tests, commit them as an atomic 'refactor: simplify' commit, then continue. Does not run a slash command or wait. Typically used when the orchestrator requested simplification (PI_PR_SIMPLIFY=1).",
       promptGuidelines: [
-        "Use simplify_diff to run /simplify on your diff before opening the PR when simplification was requested (PI_PR_SIMPLIFY=1).",
+        "Use simplify_diff to get an inline simplification task for your diff, then apply it immediately in the same turn before opening the PR (when PI_PR_SIMPLIFY=1).",
       ],
       parameters: Type.Object({}),
-      async execute() {
+      async execute(_id, _params, _signal, _onUpdate, ctx) {
         try {
-          // deliverAs "followUp": the tool runs mid-turn (streaming), so queue
-          // "/simplify" to be delivered as a user message after this turn's
-          // tools finish, which triggers pi-simplify in this worker's session.
-          pi.sendUserMessage("/simplify", { deliverAs: "followUp" });
-          return {
-            content: [
-              {
-                type: "text",
-                text: "Queued /simplify to run on your diff after this turn. When it completes, review the changes and commit them as an atomic 'refactor: simplify' commit, then continue to open the PR.",
-              },
-            ],
-          };
+          // Resolve the PR base ref from this worker's own registry entry. The
+          // worker has already COMMITTED its work, so diff against the base
+          // (not HEAD). Three-dot (merge-base) diff matches the PR's diff.
+          const base = findEntry(loadRegistry(ctx.cwd), process.env.PI_PR_ID ?? "")?.base;
+          let stdout: string | null = base ? tryGit(["diff", "--name-status", `${base}...HEAD`], ctx.cwd) : null;
+          // Fall back like pi-simplify does when base is missing/errors.
+          if (stdout === null) stdout = tryGit(["diff", "--name-status", "HEAD"], ctx.cwd);
+          if (stdout === null) stdout = tryGit(["diff", "--name-status", "HEAD~1"], ctx.cwd);
+
+          const files = parseChangedFiles(stdout ?? "");
+          if (files.length === 0) {
+            const vs = base ?? "HEAD";
+            return { content: [{ type: "text", text: `No changes vs ${vs}; nothing to simplify.` }] };
+          }
+          return { content: [{ type: "text", text: buildSimplifyPrompt(files) }] };
         } catch (err) {
           return {
-            content: [{ type: "text", text: `Failed to queue /simplify: ${(err as Error).message}` }],
+            content: [{ type: "text", text: `Failed to build simplify task: ${(err as Error).message}` }],
             isError: true,
           };
         }
