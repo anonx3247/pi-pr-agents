@@ -67,7 +67,7 @@ git commit -m "<type>: <concise description>"
 5. **Signal the PR as pushed** (final step) so your pane and the orchestrator are
    labelled AND the orchestrator starts polling the PR for merge/close:
    ```
-   pr_pushed({ prNumber: <the PR number>, url: "<the PR url>" })
+   pr_pushed({ prNumber: <the PR number>, prUrl: "<the PR url>" })
    ```
    Get the number/url from the `gh pr create` / `gt submit` output, or
    `gh pr view --json number,url`. Call `pr_pushed` only once the branch is
