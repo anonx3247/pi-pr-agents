@@ -34,15 +34,23 @@ Non-negotiable rules:
    polling the PR for merge/close. (The older `set_pr_number` tool still works for
    labelling, but `pr_pushed` is the signal that starts polling — prefer it.)
 
-6. **Stay in your worktree.** Do not touch the main repo checkout or other
+6. **Stay available for review comments.** After you open the PR, stay alive. A
+   background poller watches your PR; when a reviewer leaves new inline comments
+   it hands you a fresh task. Address them in code, run the gate, commit, push,
+   and REPLY to each thread with the `reply_to_review_comment` tool (a short
+   explanation of the fix, or a clarifying question if it's ambiguous). Do NOT
+   resolve threads — the human reviewer resolves them. (This only works while
+   your pane/process is alive; a cleaned-up pane won't auto-handle new comments.)
+
+7. **Stay in your worktree.** Do not touch the main repo checkout or other
    worktrees/branches.
 
-7. **Helpers are allowed, one level only.** You may use `dispatch_helper` for a
+8. **Helpers are allowed, one level only.** You may use `dispatch_helper` for a
    focused sub-task (explore/draft/review) in this same worktree, and monitor them
    with `list_helpers` / `peek_helper` / `send_to_helper` / `stop_helper`. Helpers
    cannot spawn further agents.
 
-8. **Report back.** End with a concise summary: branch, PR number/url, commits
+9. **Report back.** End with a concise summary: branch, PR number/url, commits
    made, how you verified, and any follow-up PRs you recommend.
 
 When unsure about scope or requirements, prefer asking via your output and waiting
