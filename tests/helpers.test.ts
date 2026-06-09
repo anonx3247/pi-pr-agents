@@ -18,9 +18,12 @@ import {
   findEntry,
   isPollable,
   isWorkingSnapshot,
+  loadProjectConfig,
   loadRegistry,
   paneTitle,
   pickRedockAgent,
+  projectConfigPath,
+  saveProjectConfig,
   saveRegistry,
   selectNewlyFinished,
   selectStateTransitions,
@@ -792,5 +795,58 @@ describe("worktreesDirFrom", () => {
   test("nests .worktrees inside the repo root, not a sibling dir", () => {
     const root = "/a/b/repo";
     assert.equal(worktreesDirFrom(root), path.join(root, ".worktrees"));
+  });
+});
+
+describe("project config round-trip", () => {
+  // projectConfigPath resolves the repo root via `git rev-parse --show-toplevel`,
+  // so operate inside a hermetic temp repo and scrub inherited GIT_* env vars
+  // that could otherwise redirect git at a different repo (test-isolation bug).
+  const GIT_ENV = ["GIT_DIR", "GIT_COMMON_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"] as const;
+  let dir: string;
+  let savedEnv: Record<string, string | undefined>;
+
+  beforeEach(() => {
+    savedEnv = {};
+    for (const k of GIT_ENV) {
+      savedEnv[k] = process.env[k];
+      delete process.env[k];
+    }
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-pr-agents-cfg-"));
+    execFileSync("git", ["init", "-q"], { cwd: dir });
+  });
+
+  afterEach(() => {
+    for (const k of GIT_ENV) {
+      if (savedEnv[k] === undefined) delete process.env[k];
+      else process.env[k] = savedEnv[k];
+    }
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("projectConfigPath points at <repo-root>/.pi/pr-agents.json and creates .pi", () => {
+    const p = projectConfigPath(dir);
+    assert.equal(path.basename(p), "pr-agents.json");
+    assert.equal(path.basename(path.dirname(p)), ".pi");
+    assert.ok(fs.existsSync(path.dirname(p)), ".pi directory should be created");
+  });
+
+  test("loadProjectConfig returns {} when no config file exists", () => {
+    assert.deepEqual(loadProjectConfig(dir), {});
+  });
+
+  test("saveProjectConfig writes and loadProjectConfig reads it back", () => {
+    saveProjectConfig(dir, { strategy: "graphite" });
+    assert.deepEqual(loadProjectConfig(dir), { strategy: "graphite" });
+    const raw = JSON.parse(fs.readFileSync(projectConfigPath(dir), "utf8"));
+    assert.deepEqual(raw, { strategy: "graphite" });
+  });
+
+  test("saveProjectConfig merges patches rather than overwriting the whole file", () => {
+    saveProjectConfig(dir, { strategy: "github" });
+    saveProjectConfig(dir, {});
+    assert.deepEqual(loadProjectConfig(dir), { strategy: "github" });
+    saveProjectConfig(dir, { strategy: "graphite" });
+    assert.deepEqual(loadProjectConfig(dir), { strategy: "graphite" });
   });
 });
