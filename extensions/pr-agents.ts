@@ -275,6 +275,12 @@ export interface PrEntry {
   prUrl?: string;
   status: "working" | "open" | "merged" | "closed" | "stopped";
   createdAt: string;
+  // Set by a PR subagent (depth 1) every time it finishes a turn, so the
+  // orchestrator (depth 0) can auto-notify itself of the result. The bridge
+  // between the two processes is purely this shared registry file.
+  lastResult?: string;
+  lastResultAt?: string;
+  resultSeq?: number;
 }
 
 export function registryPath(cwd: string): string {
@@ -315,6 +321,107 @@ export function findEntry(entries: PrEntry[], ref: string): PrEntry | undefined 
       e.prName === ref ||
       (e.prNumber !== undefined && String(e.prNumber) === ref.replace(/^#/, "")),
   );
+}
+
+// ---------------------------------------------------------------------------
+// agent_end → orchestrator notification (pure helpers)
+//
+// When a PR subagent (depth 1) finishes a turn, it records its final result on
+// its own registry entry; the orchestrator (depth 0) polls the registry and
+// notifies itself. These helpers are pure so they can be unit-tested without a
+// live pi session.
+// ---------------------------------------------------------------------------
+
+/** Default cap (in chars) for a captured subagent result. */
+export const MAX_RESULT_CHARS = 2000;
+
+/** A minimal view of an assistant text content part. */
+interface TextPartLike {
+  type?: string;
+  text?: string;
+}
+
+/** A minimal view of a message from `agent_end` event.messages. */
+interface MessageLike {
+  role?: string;
+  content?: unknown;
+}
+
+/**
+ * Cap a string to `cap` chars, keeping the TAIL (a subagent's final summary is
+ * usually at the end). When truncated, a leading ellipsis marks the cut so the
+ * result stays exactly `cap` chars.
+ */
+export function capTail(s: string, cap: number): string {
+  if (s.length <= cap) return s;
+  return `…${s.slice(s.length - cap + 1)}`;
+}
+
+/**
+ * Extract a subagent's final result from the messages of a finished prompt:
+ * take the LAST assistant message, concatenate its text parts, trim, and cap to
+ * the tail. Returns "" when there is no meaningful assistant text.
+ */
+export function extractFinalResult(messages: readonly MessageLike[], cap = MAX_RESULT_CHARS): string {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i];
+    if (!m || m.role !== "assistant") continue;
+    const content = m.content;
+    let text: string;
+    if (typeof content === "string") {
+      text = content;
+    } else if (Array.isArray(content)) {
+      text = content
+        .filter((p): p is TextPartLike => Boolean(p) && typeof p === "object" && (p as TextPartLike).type === "text")
+        .map((p) => p.text ?? "")
+        .join("");
+    } else {
+      return "";
+    }
+    const trimmed = text.trim();
+    return trimmed.length === 0 ? "" : capTail(trimmed, cap);
+  }
+  return "";
+}
+
+/**
+ * Find every PR subagent (depth 1) whose `resultSeq` is newer than the last-seen
+ * value. The seq + last-seen map dedups across polling ticks so each genuine
+ * completion notifies exactly once.
+ */
+export function selectNewlyFinished(
+  entries: readonly PrEntry[],
+  lastSeen: ReadonlyMap<string, number>,
+): { entry: PrEntry; seq: number }[] {
+  const out: { entry: PrEntry; seq: number }[] = [];
+  for (const e of entries) {
+    if (e.depth !== 1 || typeof e.resultSeq !== "number") continue;
+    if (e.resultSeq > (lastSeen.get(e.id) ?? -1)) out.push({ entry: e, seq: e.resultSeq });
+  }
+  return out;
+}
+
+/**
+ * Build the orchestrator notification for one or more newly-finished PR
+ * subagents. Multiple agents are combined into ONE message to reduce noise.
+ */
+export function buildFinishedNotification(entries: readonly PrEntry[]): string {
+  const blocks = entries.map((e) => {
+    const pr = e.prNumber !== undefined ? `#${e.prNumber}` : "pending";
+    return [
+      `- id ${e.id} · PR ${pr} · ${e.prName} · ${e.branch}`,
+      `  result: ${e.lastResult ?? "(no result captured)"}`,
+    ].join("\n");
+  });
+  const header =
+    entries.length === 1 ? "A PR subagent stopped working:" : `${entries.length} PR subagents stopped working:`;
+  return [
+    header,
+    "",
+    ...blocks,
+    "",
+    "A PR subagent stopped working. Review its result and decide the next step (peek_pr_agent for more, send_to_pr_agent to steer, /cleanup if merged, or do nothing if it's merely waiting on you). Do not take destructive actions without cause.",
+  ].join("\n");
 }
 
 // ---------------------------------------------------------------------------
@@ -850,6 +957,12 @@ export default function (pi: ExtensionAPI) {
   // Timer driving the orchestrator's live PR-agents list widget (depth 0 only).
   let widgetTimer: ReturnType<typeof setInterval> | undefined;
 
+  // Orchestrator-only: last-seen resultSeq per PR subagent id, used to detect
+  // and dedup newly-finished agents across refresh ticks. Initialized from the
+  // registry at startup so pre-existing results never replay a notification
+  // flood when the orchestrator launches.
+  const lastSeenResult = new Map<string, number>();
+
   // Dispatched PR/helper subagents run in a worktree of a repo the user already
   // chose to work in, so auto-trust it instead of blocking on the trust prompt.
   // (Only fires for user/global and CLI extensions; the worker/helper commands
@@ -898,6 +1011,11 @@ export default function (pi: ExtensionAPI) {
     // Depth 0 with a UI: render a persistent, auto-refreshing list of the
     // dispatched PR agents above the editor (status marker + latest commit).
     if (level === 0 && ctx.hasUI && !widgetTimer) {
+      // Seed last-seen from the current registry so existing results don't
+      // replay as notifications the moment the orchestrator starts.
+      for (const e of loadRegistry(ctx.cwd)) {
+        if (e.depth === 1 && typeof e.resultSeq === "number") lastSeenResult.set(e.id, e.resultSeq);
+      }
       const tick = () => {
         try {
           const width = process.stdout.columns ?? 100;
@@ -906,6 +1024,20 @@ export default function (pi: ExtensionAPI) {
         } catch {
           // tmux/git failures already degrade to null inside renderPrWidget;
           // never let the refresh loop throw.
+        }
+        // Reuse this refresh tick to auto-notify the orchestrator whenever a PR
+        // subagent finishes a turn. The seq + last-seen map dedups; isIdle
+        // picks immediate vs. follow-up delivery so we never clobber a turn.
+        try {
+          const fresh = selectNewlyFinished(loadRegistry(ctx.cwd), lastSeenResult);
+          if (fresh.length > 0) {
+            for (const { entry, seq } of fresh) lastSeenResult.set(entry.id, seq);
+            const msg = buildFinishedNotification(fresh.map((f) => f.entry));
+            if (ctx.isIdle()) pi.sendUserMessage(msg);
+            else pi.sendUserMessage(msg, { deliverAs: "followUp" });
+          }
+        } catch {
+          // Never let a notification failure break the refresh loop.
         }
       };
       tick();
@@ -1245,6 +1377,24 @@ export default function (pi: ExtensionAPI) {
   // DEPTH 1 — a PR subagent: can register its PR + spawn helpers
   // =====================================================================
   if (level === 1) {
+    // Every time this PR subagent finishes a turn (initial task completion AND
+    // after each steer), record its final result on its own registry entry so
+    // the orchestrator can auto-notify itself. The shared registry file is the
+    // only bridge between the two processes.
+    pi.on("agent_end", async (event, ctx) => {
+      const myId = process.env.PI_PR_ID;
+      if (!myId) return;
+      const result = extractFinalResult(event.messages ?? []);
+      if (!result) return;
+      const existing = loadRegistry(ctx.cwd).find((e) => e.id === myId);
+      if (!existing) return; // entry missing (race) — skip silently
+      updateEntry(ctx.cwd, myId, {
+        lastResult: result,
+        lastResultAt: new Date().toISOString(),
+        resultSeq: (existing.resultSeq ?? -1) + 1,
+      });
+    });
+
     registerTextTool(pi, {
       name: "set_pr_number",
       label: "Set PR number",
