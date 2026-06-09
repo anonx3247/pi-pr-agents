@@ -127,6 +127,7 @@ Commands: `/cleanup` (`/cleanup dry` to preview), `/pr-agents`.
 - **pr-orchestrator** — how the main agent decomposes work and dispatches PRs.
 - **pr-worker** — how a PR subagent implements, commits atomically, and opens its PR.
 - **pr-stacks** — manual GitHub stacks vs Graphite (`gt`) stacks.
+- **gt-graphite** — using Graphite's `gt` CLI: stacks, automatic restacking, submit/sync/merge lifecycle, full command reference.
 - **cleanup** — tidying up merged/closed PR worktrees.
 
 ## How depth is enforced

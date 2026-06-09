@@ -41,6 +41,8 @@ and rebase it onto `main`.
 
 ## Graphite stack
 
+See the `gt-graphite` skill for the full `gt` workflow and command reference.
+
 ```bash
 # one-time, per repo
 gt init            # if the repo isn't initialised for graphite yet

@@ -62,7 +62,7 @@ git commit -m "<type>: <concise description>"
    ```
    (Or, if you are creating the branch through Graphite from scratch, use
    `gt create -m "<message>"` per commit instead of raw `git commit`.) See the
-   `pr-stacks` skill.
+   `pr-stacks` and `gt-graphite` skills.
 
 5. **Signal the PR as pushed** (final step) so your pane and the orchestrator are
    labelled AND the orchestrator starts polling the PR for merge/close:
