@@ -30,8 +30,10 @@ git commit -m "<type>: <concise description>"
 1. **Implement** the task, committing atomically as you go.
 2. **Verify**: run the project's tests/build/lint. Fix and re-commit until green.
 3. **Simplify (if requested)**: if `PI_PR_SIMPLIFY=1` (the orchestrator opted in),
-   run `/simplify` on your diff to tidy the changed code, then commit the result
-   as its own atomic commit (e.g. `refactor: simplify`). Requires pi-simplify.
+   call the `simplify_diff` tool (it runs `/simplify` for you, since an autonomous
+   agent can't invoke a slash command directly) to tidy the changed code, then
+   commit the result as its own atomic commit (e.g. `refactor: simplify`).
+   Requires pi-simplify.
 4. **Push and open the PR**, according to your mode:
 
    ### mode = independent  (plain GitHub PR off the base branch)

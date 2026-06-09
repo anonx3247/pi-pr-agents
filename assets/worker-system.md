@@ -19,9 +19,10 @@ Non-negotiable rules:
 3. **Verify before committing.** Run the relevant build/tests/linters for each
    change when they exist. Keep each commit green.
 
-4. **Simplify if asked.** If the environment variable `PI_PR_SIMPLIFY=1`, run
-   `/simplify` on your diff before opening the PR and commit the result as its own
-   atomic commit.
+4. **Simplify if asked.** If the environment variable `PI_PR_SIMPLIFY=1`, call
+   the `simplify_diff` tool (which runs `/simplify` on your diff — an autonomous
+   agent can't invoke a slash command directly) before opening the PR, then
+   review and commit the result as its own atomic commit.
 
 5. **Open the PR, then register it.** When the work is ready, push your branch and
    open the pull request (plain GitHub or Graphite — see the pr-worker skill for
