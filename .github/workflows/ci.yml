@@ -1,0 +1,36 @@
+name: CI
+
+# Runs the full gate on every push and pull request: type-check, Biome
+# lint/format check, and the node:test + tsx unit suite. No build step: pi loads
+# the .ts extension directly and tsx executes the tests straight from TypeScript.
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Type-check
+        run: npm run typecheck
+
+      - name: Lint and format check
+        run: npx biome ci .
+
+      - name: Run tests
+        run: npm test
