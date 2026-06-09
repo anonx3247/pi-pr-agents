@@ -309,7 +309,6 @@ export interface PrEntry {
   simplify?: boolean;
   prNumber?: number;
   prUrl?: string;
-  url?: string;
   status: "working" | "open" | "merged" | "closed" | "stopped";
   createdAt: string;
   // Set by the worker (depth 1) via `pr_pushed` once the branch is pushed AND
@@ -2510,7 +2509,7 @@ export default function (pi: ExtensionAPI) {
           return { content: [{ type: "text", text: "PI_PR_ID not set; cannot mark PR as pushed." }], isError: true };
         const entry = updateEntry(ctx.cwd, myId, {
           prNumber: params.prNumber,
-          url: params.url,
+          prUrl: params.url,
           pushed: true,
           pushedAt: new Date().toISOString(),
           status: "open",
@@ -2520,7 +2519,7 @@ export default function (pi: ExtensionAPI) {
           content: [
             {
               type: "text",
-              text: `Marked PR #${params.prNumber} as pushed; the orchestrator will now poll it for merge/close (and, later, review comments).`,
+              text: `Marked PR #${params.prNumber}${params.url ? ` (${params.url})` : ""} as pushed; the orchestrator will now poll it for merge/close (and, later, review comments).`,
             },
           ],
         };
