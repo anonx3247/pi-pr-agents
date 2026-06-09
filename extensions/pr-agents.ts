@@ -24,7 +24,7 @@ import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { StringEnum } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ToolDefinition } from "@earendil-works/pi-coding-agent";
-import { Type, type TSchema } from "typebox";
+import { type TSchema, Type } from "typebox";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const PKG_ROOT = path.resolve(HERE, "..");
@@ -344,17 +344,7 @@ function paneAlive(paneId: string): boolean {
  * re-tile so the dispatching agent stays large on the left (main-vertical).
  */
 function openPane(cwd: string, command: string, title: string): string {
-  const paneId = tmux([
-    "split-window",
-    "-h",
-    "-d",
-    "-P",
-    "-F",
-    "#{pane_id}",
-    "-c",
-    cwd,
-    command,
-  ]);
+  const paneId = tmux(["split-window", "-h", "-d", "-P", "-F", "#{pane_id}", "-c", cwd, command]);
   tryTmux(["select-pane", "-t", paneId, "-T", title]);
   // Keep the orchestrator pane dominant on the left, PR panes stacked right.
   tryTmux(["set-window-option", "-t", paneId, "main-pane-width", "55%"]);
@@ -479,7 +469,10 @@ interface CleanupResult {
 function branchMerged(cwd: string, branch: string, base: string): boolean {
   const merged = tryGit(["branch", "--merged", base, "--format=%(refname:short)"], cwd);
   if (!merged) return false;
-  return merged.split("\n").map((s) => s.trim()).includes(branch);
+  return merged
+    .split("\n")
+    .map((s) => s.trim())
+    .includes(branch);
 }
 
 function prState(cwd: string, number: number): string | null {
@@ -607,9 +600,7 @@ function withEntry(
 function registerTextTool<TParams extends TSchema>(
   pi: ExtensionAPI,
   def: Omit<ToolDefinition<TParams>, "execute"> & {
-    execute: (
-      ...args: Parameters<ToolDefinition<TParams>["execute"]>
-    ) => ToolTextResult | Promise<ToolTextResult>;
+    execute: (...args: Parameters<ToolDefinition<TParams>["execute"]>) => ToolTextResult | Promise<ToolTextResult>;
   },
 ): void {
   const { execute, ...rest } = def;
@@ -786,8 +777,7 @@ export default function (pi: ExtensionAPI) {
         if (!already) {
           const ok = await ctx.ui.confirm(
             "Install pi tmux wrapper?",
-            "pi-pr-agents runs each PR subagent in its own tmux pane, so pi should run inside tmux.\n\n" +
-              `Install a \`pi\` shell function in ${rc ?? "your shell config"} that auto-launches pi inside tmux when you're not already in it? (You can re-run it later with /pr-install-tmux-alias.)`,
+            `pi-pr-agents runs each PR subagent in its own tmux pane, so pi should run inside tmux.\n\nInstall a \`pi\` shell function in ${rc ?? "your shell config"} that auto-launches pi inside tmux when you're not already in it? (You can re-run it later with /pr-install-tmux-alias.)`,
           );
           if (ok) {
             const res = installTmuxAlias();
@@ -846,8 +836,7 @@ export default function (pi: ExtensionAPI) {
       label: "Dispatch PR agent",
       description:
         "Split off one PR of work and hand it to a dedicated subagent. Creates a git worktree + branch, opens a labelled tmux pane running `pi`, and seeds it with the task. The subagent commits atomically and opens the PR. Use mode 'independent' for a standalone PR off the base branch, 'stack' to stack a manual PR onto the previous one, or 'graphite' to build a Graphite stack with `gt`.",
-      promptSnippet:
-        "Hand one PR-sized chunk of work to its own worktree subagent in a tmux pane.",
+      promptSnippet: "Hand one PR-sized chunk of work to its own worktree subagent in a tmux pane.",
       promptGuidelines: [
         "Use dispatch_pr to delegate every code change — the main agent must not edit files itself.",
         "Use dispatch_pr once per PR, splitting large work into a sequence of small, reviewable PRs.",
@@ -1000,7 +989,8 @@ export default function (pi: ExtensionAPI) {
       list: {
         name: "list_pr_agents",
         label: "List PR agents",
-        description: "List every dispatched PR subagent with its PR number/name, branch, mode, tmux pane and live status.",
+        description:
+          "List every dispatched PR subagent with its PR number/name, branch, mode, tmux pane and live status.",
         promptGuidelines: ["Use list_pr_agents to review the current set of in-flight PRs before dispatching more."],
         empty: "No PR agents dispatched yet.",
         entries: (cwd) => loadRegistry(cwd).filter((e) => e.depth === 1),
@@ -1025,8 +1015,11 @@ export default function (pi: ExtensionAPI) {
       send: {
         name: "send_to_pr_agent",
         label: "Send to PR agent",
-        description: "Type a message into a PR subagent's pi session and submit it (steer it, answer a question, or give follow-up work).",
-        promptGuidelines: ["Use send_to_pr_agent to give a running PR subagent follow-up instructions instead of editing code yourself."],
+        description:
+          "Type a message into a PR subagent's pi session and submit it (steer it, answer a question, or give follow-up work).",
+        promptGuidelines: [
+          "Use send_to_pr_agent to give a running PR subagent follow-up instructions instead of editing code yourself.",
+        ],
         messageDescription: "Message to send to the subagent.",
         success: (e) => `Sent to ${e.prName} (${e.paneId}).`,
         paneDead: (paneId) => `Pane ${paneId} is no longer live.`,
@@ -1036,7 +1029,9 @@ export default function (pi: ExtensionAPI) {
         label: "Stop PR agent",
         description:
           "Stop a PR subagent. mode 'interrupt' aborts its current turn (Escape) but keeps the session alive so you can re-steer it with send_to_pr_agent; mode 'kill' closes the pane entirely (the worktree and branch are kept for inspection).",
-        promptGuidelines: ["Use stop_pr_agent to halt a subagent that is going the wrong way, then send_to_pr_agent to redirect it."],
+        promptGuidelines: [
+          "Use stop_pr_agent to halt a subagent that is going the wrong way, then send_to_pr_agent to redirect it.",
+        ],
         paneDead: (paneId) => `Pane ${paneId} is no longer live.`,
         result: (mode, e) =>
           mode === "kill"
@@ -1057,7 +1052,12 @@ export default function (pi: ExtensionAPI) {
           tryTmux(["select-window", "-t", entry.paneId]);
           const ok = tryTmux(["select-pane", "-t", entry.paneId]);
           return {
-            content: [{ type: "text", text: ok === null ? "Pane no longer exists." : `Focused ${entry.prName} (${entry.paneId}).` }],
+            content: [
+              {
+                type: "text",
+                text: ok === null ? "Pane no longer exists." : `Focused ${entry.prName} (${entry.paneId}).`,
+              },
+            ],
           };
         });
       },
@@ -1123,7 +1123,8 @@ export default function (pi: ExtensionAPI) {
       }),
       async execute(_id, params, _signal, _onUpdate, ctx) {
         const myId = process.env.PI_PR_ID;
-        if (!myId) return { content: [{ type: "text", text: "PI_PR_ID not set; cannot record PR number." }], isError: true };
+        if (!myId)
+          return { content: [{ type: "text", text: "PI_PR_ID not set; cannot record PR number." }], isError: true };
         const entry = updateEntry(ctx.cwd, myId, {
           prNumber: params.number,
           prUrl: params.url,
@@ -1140,7 +1141,9 @@ export default function (pi: ExtensionAPI) {
       description:
         "Spawn a helper subagent in THIS same worktree (e.g. to explore, draft, or review part of the PR) as a new tmux pane. Helpers cannot dispatch further subagents (max depth reached).",
       promptSnippet: "Spawn a helper subagent in this worktree for a focused sub-task.",
-      promptGuidelines: ["Use dispatch_helper only for sub-tasks of the current PR; helpers cannot spawn their own subagents."],
+      promptGuidelines: [
+        "Use dispatch_helper only for sub-tasks of the current PR; helpers cannot spawn their own subagents.",
+      ],
       parameters: Type.Object({
         name: Type.String({ description: "Short name for the helper, e.g. 'review' or 'explore-auth'." }),
         task: Type.String({ description: "Self-contained instructions for the helper." }),
@@ -1155,7 +1158,10 @@ export default function (pi: ExtensionAPI) {
         try {
           paneId = openPane(ctx.cwd, command, `↳ helper: ${params.name}`);
         } catch (err) {
-          return { content: [{ type: "text", text: `Failed to open helper pane: ${(err as Error).message}` }], isError: true };
+          return {
+            content: [{ type: "text", text: `Failed to open helper pane: ${(err as Error).message}` }],
+            isError: true,
+          };
         }
         const hid = randomUUID().slice(0, 8);
         const entry: PrEntry = {
@@ -1220,7 +1226,8 @@ export default function (pi: ExtensionAPI) {
       stop: {
         name: "stop_helper",
         label: "Stop helper",
-        description: "Stop a helper subagent. mode 'interrupt' aborts its current turn (Escape); mode 'kill' closes its pane.",
+        description:
+          "Stop a helper subagent. mode 'interrupt' aborts its current turn (Escape); mode 'kill' closes its pane.",
         paneDead: (paneId) => `Pane ${paneId} no longer live.`,
         result: (mode, e) => `${mode === "kill" ? "Killed" : "Interrupted"} helper ${e.prName} (${e.paneId}).`,
       },

@@ -6,12 +6,12 @@ import * as path from "node:path";
 import { afterEach, beforeEach, describe, test } from "node:test";
 
 import {
+  type PrEntry,
   aliasBlock,
   detectShell,
   findEntry,
   loadRegistry,
   paneTitle,
-  type PrEntry,
   saveRegistry,
   shq,
   slugify,
@@ -57,10 +57,7 @@ describe("shq", () => {
 
 describe("paneTitle", () => {
   test("includes the PR number when set", () => {
-    assert.equal(
-      paneTitle({ prNumber: 42, prName: "add tests", branch: "pi/tests" }),
-      "PR#42 add tests (pi/tests)",
-    );
+    assert.equal(paneTitle({ prNumber: 42, prName: "add tests", branch: "pi/tests" }), "PR#42 add tests (pi/tests)");
   });
 
   test("omits the number when prNumber is undefined", () => {
