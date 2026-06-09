@@ -716,6 +716,12 @@ describe("buildCleanupNotification", () => {
 
 describe("registry round-trip", () => {
   let dir: string;
+  // git exports these when the suite runs under a hook (e.g. simple-git-hooks'
+  // pre-push runs `npm test`). They override cwd, so `git rev-parse
+  // --git-common-dir` would resolve to the REAL repo and registry writes would
+  // escape the temp dir. Clear them here and restore exactly in afterEach.
+  const GIT_ENV_VARS = ["GIT_DIR", "GIT_COMMON_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"] as const;
+  let savedGitEnv: Record<string, string | undefined>;
 
   function makeEntry(id: string): PrEntry {
     return {
@@ -734,14 +740,26 @@ describe("registry round-trip", () => {
   }
 
   beforeEach(() => {
+    savedGitEnv = {};
+    for (const key of GIT_ENV_VARS) {
+      savedGitEnv[key] = process.env[key];
+      delete process.env[key];
+    }
     dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-pr-agents-test-"));
     // registryPath derives its dir from gitCommonDir(cwd), which shells out to
     // git, so initialise a real (empty, quiet) repo to keep the test hermetic.
-    execFileSync("git", ["init", "-q"], { cwd: dir });
+    // Pass an explicit env without the git location vars so init resolves
+    // against the temp dir's cwd, not an inherited repo.
+    execFileSync("git", ["init", "-q"], { cwd: dir, env: process.env });
   });
 
   afterEach(() => {
     fs.rmSync(dir, { recursive: true, force: true });
+    for (const key of GIT_ENV_VARS) {
+      const value = savedGitEnv[key];
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
   });
 
   test("saveRegistry/loadRegistry round-trips entries", () => {
