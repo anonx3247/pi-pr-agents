@@ -777,6 +777,21 @@ export function buildReviewTask(
  * issue comments) via gh. Tolerates nulls/missing fields everywhere: any gh
  * failure yields an empty slice so the feature degrades to a no-op. IO; not pure.
  */
+/** Safe field accessors over the loosely-typed JSON gh returns. */
+function str(o: Record<string, unknown>, key: string): string {
+  const v = o[key];
+  return typeof v === "string" ? v : "";
+}
+function numOrUndef(o: Record<string, unknown>, key: string): number | undefined {
+  const v = o[key];
+  return typeof v === "number" ? v : undefined;
+}
+/** Extract a nested `<key>.login` string (gh's author/user objects). */
+function loginOf(o: Record<string, unknown>, key: string): string {
+  const login = (o[key] as { login?: unknown } | null)?.login;
+  return typeof login === "string" ? login : "";
+}
+
 function fetchReviewActivity(owner: string, repo: string, prNumber: number, cwd: string): FetchedReviewActivity {
   const inline: InlineComment[] = [];
   const rawInline = runGhApiJson(["api", "--paginate", `repos/${owner}/${repo}/pulls/${prNumber}/comments`], cwd);
@@ -786,16 +801,15 @@ function fetchReviewActivity(owner: string, repo: string, prNumber: number, cwd:
       const o = c as Record<string, unknown>;
       const id = Number(o.id);
       if (!Number.isFinite(id)) continue;
-      const user = (o.user as { login?: unknown } | null)?.login;
       const line = o.line ?? o.original_line ?? null;
       inline.push({
         id,
-        user: typeof user === "string" ? user : "",
-        body: typeof o.body === "string" ? o.body : "",
-        path: typeof o.path === "string" ? o.path : "",
+        user: loginOf(o, "user"),
+        body: str(o, "body"),
+        path: str(o, "path"),
         line: typeof line === "number" ? line : null,
-        createdAt: typeof o.created_at === "string" ? o.created_at : "",
-        inReplyToId: typeof o.in_reply_to_id === "number" ? o.in_reply_to_id : null,
+        createdAt: str(o, "created_at"),
+        inReplyToId: numOrUndef(o, "in_reply_to_id") ?? null,
       });
     }
   }
@@ -807,11 +821,11 @@ function fetchReviewActivity(owner: string, repo: string, prNumber: number, cwd:
       if (!r || typeof r !== "object") continue;
       const o = r as Record<string, unknown>;
       reviews.push({
-        id: typeof o.id === "number" ? o.id : undefined,
-        author: ((o.author as { login?: unknown } | null)?.login as string) ?? "",
-        body: typeof o.body === "string" ? o.body : "",
-        state: typeof o.state === "string" ? o.state : "",
-        submittedAt: typeof o.submittedAt === "string" ? o.submittedAt : "",
+        id: numOrUndef(o, "id"),
+        author: loginOf(o, "author"),
+        body: str(o, "body"),
+        state: str(o, "state"),
+        submittedAt: str(o, "submittedAt"),
       });
     }
   }
@@ -823,10 +837,10 @@ function fetchReviewActivity(owner: string, repo: string, prNumber: number, cwd:
       if (!c || typeof c !== "object") continue;
       const o = c as Record<string, unknown>;
       issueComments.push({
-        id: typeof o.id === "number" ? o.id : undefined,
-        author: ((o.author as { login?: unknown } | null)?.login as string) ?? "",
-        body: typeof o.body === "string" ? o.body : "",
-        createdAt: typeof o.createdAt === "string" ? o.createdAt : "",
+        id: numOrUndef(o, "id"),
+        author: loginOf(o, "author"),
+        body: str(o, "body"),
+        createdAt: str(o, "createdAt"),
       });
     }
   }
