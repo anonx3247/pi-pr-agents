@@ -369,15 +369,15 @@ describe("aliasBlock", () => {
 
   test("fish block defines a wrapping function and markers", () => {
     const block = aliasBlock("fish");
-    assert.ok(block.includes("function pi --wraps pi"));
+    assert.ok(block.includes("function pr-pi --wraps pi"));
     assert.ok(block.includes(BEGIN));
     assert.ok(block.includes(END));
   });
 
   for (const kind of ["zsh", "bash"] as const) {
-    test(`${kind} block defines a pi() function and markers`, () => {
+    test(`${kind} block defines a pr-pi() function and markers`, () => {
       const block = aliasBlock(kind);
-      assert.ok(block.includes("pi() {"));
+      assert.ok(block.includes("pr-pi() {"));
       assert.ok(block.includes(BEGIN));
       assert.ok(block.includes(END));
     });
