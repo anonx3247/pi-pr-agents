@@ -78,6 +78,26 @@ git commit -m "<type>: <concise description>"
    made, how you verified, and any follow-up PRs you recommend the orchestrator
    split off.
 
+## Review-comment loop (stay available after opening the PR)
+
+After you open the PR, **stay alive** — do not consider the pane disposable. A
+background poller (every ~30s, only once your PR is pushed and numbered) watches
+your PR for new reviewer feedback. When new inline review comments arrive it
+hands you a fresh task that lists each comment and asks you to:
+
+1. Address each comment with code changes.
+2. Run the gate (`npm run typecheck && npm run lint && npm test`) and commit
+   (e.g. `fix: address review feedback`).
+3. Push with `git push`.
+4. **Reply to each inline thread** with the `reply_to_review_comment` tool
+   (`commentId` = the numeric id from `rc:<id>`, `body` = a short explanation of
+   your fix or a clarifying question).
+
+Replies do **not** resolve threads — leave resolving to the human reviewer. If a
+comment is ambiguous or architectural, reply asking for clarification rather than
+guessing. (Known limitation: this only works while your pane/process is alive; if
+it was already cleaned up, new comments won't be auto-handled.)
+
 ## Helpers (optional, one level only)
 
 For a focused sub-task you may spawn a helper in this same worktree:
