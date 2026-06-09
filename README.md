@@ -77,15 +77,16 @@ pi install npm:pi-lens         # inline diagnostics + LSP/ast-grep in every work
 ### tmux auto-launch (optional)
 
 Because the workflow needs tmux, the first time you start the main agent **outside**
-tmux the package offers to install a shell `pi` wrapper that auto-launches pi inside
-tmux from then on (inside tmux it just runs pi normally). You can run it any time:
+tmux the package offers to install a shell `pr-pi` command that launches pi inside
+tmux (inside tmux it just runs pi normally). Plain `pi` is left completely unchanged —
+use `pr-pi` when you want the tmux-wrapped launch. You can run it any time:
 
 ```
 /pr-install-tmux-alias
 ```
 
 It writes an idempotent, marker-delimited block to `~/.zshrc`, `~/.bashrc`, or
-`~/.config/fish/functions/pi.fish` depending on your shell. Set
+`~/.config/fish/functions/pr-pi.fish` depending on your shell. Set
 `PI_PR_NO_ALIAS_PROMPT=1` to suppress the offer.
 
 ## Install
@@ -96,7 +97,7 @@ pi install git:github.com/anonx3247/pi-pr-agents   # from GitHub
 pi install /path/to/pi-pr-agents      # local checkout
 ```
 
-Then start pi inside tmux and just describe the work:
+Then start pi inside tmux (e.g. with `pr-pi`, or `tmux new -s pr` then `pi`) and just describe the work:
 
 > "Add rate limiting to the API: a token-bucket limiter, wire it into the
 > middleware, and add config. Split it into PRs."
@@ -145,7 +146,7 @@ the main repo and every worktree, so each agent sees the same set of PRs.
 
 - `PI_PR_ALLOW_MAIN_EDITS=1` — let the main agent keep `edit`/`write` (off by
   default; the orchestrator is meant to delegate, not edit).
-- `PI_PR_NO_ALIAS_PROMPT=1` — don't offer to install the tmux `pi` wrapper.
+- `PI_PR_NO_ALIAS_PROMPT=1` — don't offer to install the tmux `pr-pi` wrapper.
 - `PI_PR_DEPTH` / `PI_PR_SIMPLIFY` — set automatically on dispatched subagents;
   you don't set these by hand.
 
