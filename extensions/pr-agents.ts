@@ -333,6 +333,15 @@ export function paneTitle(entry: Pick<PrEntry, "prNumber" | "prName" | "branch">
   return `${tag} ${entry.prName} (${entry.branch})`;
 }
 
+/**
+ * Concise tmux window name (for `tmux list-windows`) derived from the PR
+ * number / name / branch. Slugified and capped so the window list stays tidy.
+ */
+export function windowName(entry: Pick<PrEntry, "prNumber" | "prName" | "branch">): string {
+  const tag = entry.prNumber !== undefined ? `pr${entry.prNumber}` : "pr";
+  return `${tag}-${slugify(entry.prName || entry.branch)}`.slice(0, 24).replace(/-+$/g, "") || "pr";
+}
+
 function paneAlive(paneId: string): boolean {
   const out = tryTmux(["list-panes", "-a", "-F", "#{pane_id}"]);
   if (!out) return false;
@@ -342,6 +351,7 @@ function paneAlive(paneId: string): boolean {
 /**
  * Open a new pane running `command` (a shell string) in `cwd`, label it, and
  * re-tile so the dispatching agent stays large on the left (main-vertical).
+ * Used for helper subagents, which live alongside their parent PR agent.
  */
 function openPane(cwd: string, command: string, title: string): string {
   const paneId = tmux(["split-window", "-h", "-d", "-P", "-F", "#{pane_id}", "-c", cwd, command]);
@@ -349,6 +359,19 @@ function openPane(cwd: string, command: string, title: string): string {
   // Keep the orchestrator pane dominant on the left, PR panes stacked right.
   tryTmux(["set-window-option", "-t", paneId, "main-pane-width", "55%"]);
   tryTmux(["select-layout", "-t", paneId, "main-vertical"]);
+  return paneId;
+}
+
+/**
+ * Launch `command` in its OWN tmux window, created in the background (`-d` keeps
+ * focus on the orchestrator). Returns the new pane id (registry's paneId), which
+ * still works with `-t %paneId` across windows. Used for PR subagents so the
+ * orchestrator stays full-screen; the agent is reachable via the list widget and
+ * focus_pr_agent (which select-window + select-pane brings full-screen).
+ */
+function openWindow(cwd: string, command: string, title: string, name: string): string {
+  const paneId = tmux(["new-window", "-d", "-P", "-F", "#{pane_id}", "-c", cwd, "-n", name, command]);
+  tryTmux(["select-pane", "-t", paneId, "-T", title]);
   return paneId;
 }
 
@@ -947,12 +970,12 @@ export default function (pi: ExtensionAPI) {
         const command = buildWorkerCommand(entry, taskMsg);
         let paneId: string;
         try {
-          paneId = openPane(worktree, command, paneTitle(entry));
+          paneId = openWindow(worktree, command, paneTitle(entry), windowName(entry));
         } catch (err) {
           tryGit(["worktree", "remove", "--force", worktree], root);
           tryGit(["branch", "-D", branch], root);
           return {
-            content: [{ type: "text", text: `Failed to open tmux pane: ${(err as Error).message}` }],
+            content: [{ type: "text", text: `Failed to open tmux window: ${(err as Error).message}` }],
             isError: true,
           };
         }
@@ -964,7 +987,7 @@ export default function (pi: ExtensionAPI) {
             {
               type: "text",
               text: [
-                `Dispatched PR subagent.`,
+                `Dispatched PR subagent in a background tmux window (orchestrator stays full-screen).`,
                 `  id:       ${id}`,
                 `  pr_name:  ${params.pr_name}`,
                 `  branch:   ${branch}`,
@@ -973,7 +996,8 @@ export default function (pi: ExtensionAPI) {
                 `  worktree: ${worktree}`,
                 `  pane:     ${paneId}`,
                 ``,
-                `Use focus_pr_agent({id:"${id}"}) to jump to it, send_to_pr_agent to steer it, list_pr_agents to track status.`,
+                `It shows up live in the "● PR agents" list widget. Use focus_pr_agent({id:"${id}"}) to bring it`,
+                `full-screen, send_to_pr_agent to steer it, list_pr_agents to track status.`,
               ].join("\n"),
             },
           ],
