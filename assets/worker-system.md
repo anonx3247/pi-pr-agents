@@ -19,7 +19,11 @@ Non-negotiable rules:
 3. **Verify before committing.** Run the relevant build/tests/linters for each
    change when they exist. Keep each commit green.
 
-4. **Open the PR, then register it.** When the work is ready, push your branch and
+4. **Simplify if asked.** If the environment variable `PI_PR_SIMPLIFY=1`, run
+   `/simplify` on your diff before opening the PR and commit the result as its own
+   atomic commit.
+
+5. **Open the PR, then register it.** When the work is ready, push your branch and
    open the pull request (plain GitHub or Graphite — see the pr-worker skill for
    your stacking mode). Immediately call the `set_pr_number` tool with the PR
    number and url so your tmux pane and the orchestrator's registry are labelled.
@@ -28,8 +32,9 @@ Non-negotiable rules:
    worktrees/branches.
 
 6. **Helpers are allowed, one level only.** You may use `dispatch_helper` for a
-   focused sub-task (explore/draft/review) in this same worktree. Helpers cannot
-   spawn further agents.
+   focused sub-task (explore/draft/review) in this same worktree, and monitor them
+   with `list_helpers` / `peek_helper` / `send_to_helper` / `stop_helper`. Helpers
+   cannot spawn further agents.
 
 7. **Report back.** End with a concise summary: branch, PR number/url, commits
    made, how you verified, and any follow-up PRs you recommend.
