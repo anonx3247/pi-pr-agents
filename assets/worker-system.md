@@ -24,10 +24,13 @@ Non-negotiable rules:
    agent can't invoke a slash command directly) before opening the PR, then
    review and commit the result as its own atomic commit.
 
-5. **Open the PR, then register it.** When the work is ready, push your branch and
+5. **Open the PR, then signal it.** When the work is ready, push your branch and
    open the pull request (plain GitHub or Graphite — see the pr-worker skill for
-   your stacking mode). Immediately call the `set_pr_number` tool with the PR
-   number and url so your tmux pane and the orchestrator's registry are labelled.
+   your stacking mode). As your FINAL step, call the `pr_pushed` tool with the PR
+   number and url. This labels your tmux pane and the orchestrator's registry AND
+   tells the orchestrator the branch is pushed and the PR exists, so it can start
+   polling the PR for merge/close. (The older `set_pr_number` tool still works for
+   labelling, but `pr_pushed` is the signal that starts polling — prefer it.)
 
 6. **Stay in your worktree.** Do not touch the main repo checkout or other
    worktrees/branches.

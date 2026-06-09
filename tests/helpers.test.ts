@@ -8,16 +8,20 @@ import { afterEach, beforeEach, describe, test } from "node:test";
 import {
   type PrEntry,
   aliasBlock,
+  buildCleanupNotification,
   buildFinishedNotification,
   capTail,
+  classifyPrState,
   detectShell,
   extractFinalResult,
   findEntry,
+  isPollable,
   isWorkingSnapshot,
   loadRegistry,
   paneTitle,
   saveRegistry,
   selectNewlyFinished,
+  selectStateTransitions,
   shq,
   slugify,
   statusMarker,
@@ -386,6 +390,157 @@ describe("buildFinishedNotification", () => {
     assert.ok(msg.startsWith("2 PR subagents stopped working:"));
     assert.ok(msg.includes("id aaa"));
     assert.ok(msg.includes("id bbb"));
+  });
+});
+
+describe("classifyPrState", () => {
+  test("non-null mergedAt always means merged", () => {
+    assert.equal(classifyPrState({ state: "OPEN", mergedAt: "2026-01-01T00:00:00Z" }), "merged");
+  });
+
+  test("maps gh state strings (case-insensitive)", () => {
+    assert.equal(classifyPrState({ state: "MERGED", mergedAt: null }), "merged");
+    assert.equal(classifyPrState({ state: "CLOSED", mergedAt: null }), "closed");
+    assert.equal(classifyPrState({ state: "OPEN", mergedAt: null }), "open");
+    assert.equal(classifyPrState({ state: "open" }), "open");
+  });
+
+  test("returns 'unknown' for null, non-objects, and unrecognized states", () => {
+    assert.equal(classifyPrState(null), "unknown");
+    assert.equal(classifyPrState("OPEN"), "unknown");
+    assert.equal(classifyPrState({ state: "DRAFT" }), "unknown");
+    assert.equal(classifyPrState({}), "unknown");
+  });
+});
+
+describe("isPollable", () => {
+  function entry(patch: Partial<PrEntry>): PrEntry {
+    return {
+      id: "x",
+      prName: "pr x",
+      branch: "pi/x",
+      base: "main",
+      mode: "independent",
+      paneId: "%1",
+      worktree: "/tmp",
+      depth: 1,
+      parentId: "root",
+      status: "open",
+      createdAt: "2026-01-01T00:00:00.000Z",
+      ...patch,
+    };
+  }
+
+  test("pushed + numeric prNumber + open => true", () => {
+    assert.equal(isPollable(entry({ pushed: true, prNumber: 7, status: "open" })), true);
+  });
+
+  test("not pushed => false (zero gh calls before pr_pushed)", () => {
+    assert.equal(isPollable(entry({ prNumber: 7, status: "open" })), false);
+    assert.equal(isPollable(entry({ pushed: false, prNumber: 7, status: "open" })), false);
+  });
+
+  test("terminal status => false", () => {
+    assert.equal(isPollable(entry({ pushed: true, prNumber: 7, status: "merged" })), false);
+    assert.equal(isPollable(entry({ pushed: true, prNumber: 7, status: "closed" })), false);
+    assert.equal(isPollable(entry({ pushed: true, prNumber: 7, status: "stopped" })), false);
+  });
+
+  test("missing prNumber => false", () => {
+    assert.equal(isPollable(entry({ pushed: true, status: "open" })), false);
+  });
+
+  test("non-depth-1 entries are not pollable", () => {
+    assert.equal(isPollable(entry({ pushed: true, prNumber: 7, status: "open", depth: 2 })), false);
+  });
+});
+
+describe("selectStateTransitions", () => {
+  function entry(id: string, patch: Partial<PrEntry> = {}): PrEntry {
+    return {
+      id,
+      prName: `pr ${id}`,
+      branch: `pi/${id}`,
+      base: "main",
+      mode: "independent",
+      paneId: "%1",
+      worktree: "/tmp",
+      depth: 1,
+      parentId: "root",
+      status: "open",
+      createdAt: "2026-01-01T00:00:00.000Z",
+      ...patch,
+    };
+  }
+
+  test("selects entries that newly reached a terminal state", () => {
+    const classified = [
+      { entry: entry("a", { prNumber: 1 }), state: "merged" as const },
+      { entry: entry("b", { prNumber: 2 }), state: "closed" as const },
+      { entry: entry("c", { prNumber: 3 }), state: "open" as const },
+    ];
+    const out = selectStateTransitions(classified, new Map([["a", "open"]]));
+    assert.deepEqual(
+      out.map((t) => [t.entry.id, t.state]),
+      [
+        ["a", "merged"],
+        ["b", "closed"],
+      ],
+    );
+  });
+
+  test("dedups entries already known to be in that terminal state", () => {
+    const classified = [{ entry: entry("a"), state: "merged" as const }];
+    assert.deepEqual(selectStateTransitions(classified, new Map([["a", "merged"]])), []);
+  });
+
+  test("ignores non-terminal (open/unknown) states", () => {
+    const classified = [
+      { entry: entry("a"), state: "open" as const },
+      { entry: entry("b"), state: "unknown" as const },
+    ];
+    assert.deepEqual(selectStateTransitions(classified, new Map()), []);
+  });
+});
+
+describe("buildCleanupNotification", () => {
+  function entry(id: string, patch: Partial<PrEntry> = {}): PrEntry {
+    return {
+      id,
+      prName: `pr ${id}`,
+      branch: `pi/${id}`,
+      base: "main",
+      mode: "independent",
+      paneId: "%1",
+      worktree: "/tmp",
+      depth: 1,
+      parentId: "root",
+      status: "open",
+      createdAt: "2026-01-01T00:00:00.000Z",
+      ...patch,
+    };
+  }
+
+  test("single transition names the PR, branch, state and cleanup tool", () => {
+    const msg = buildCleanupNotification([
+      { entry: entry("a", { prNumber: 42, prName: "add limiter", branch: "pi/limiter" }), state: "merged" },
+    ]);
+    assert.ok(msg.includes("PR #42 'add limiter' (branch pi/limiter) was merged on GitHub."));
+    assert.ok(msg.includes("cleanup_pr_worktrees"));
+  });
+
+  test("combines multiple transitions into one message", () => {
+    const msg = buildCleanupNotification([
+      { entry: entry("a", { prNumber: 1 }), state: "merged" },
+      { entry: entry("b", { prNumber: 2 }), state: "closed" },
+    ]);
+    assert.ok(msg.includes("PR #1 'pr a' (branch pi/a) was merged on GitHub."));
+    assert.ok(msg.includes("PR #2 'pr b' (branch pi/b) was closed on GitHub."));
+  });
+
+  test("uses a placeholder when the PR number is missing", () => {
+    const msg = buildCleanupNotification([{ entry: entry("a", { prNumber: undefined }), state: "merged" }]);
+    assert.ok(msg.includes("PR (no number) 'pr a'"));
   });
 });
 

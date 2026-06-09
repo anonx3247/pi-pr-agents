@@ -63,12 +63,15 @@ git commit -m "<type>: <concise description>"
    `gt create -m "<message>"` per commit instead of raw `git commit`.) See the
    `pr-stacks` skill.
 
-5. **Register the PR number** so your pane and the orchestrator are labelled:
+5. **Signal the PR as pushed** (final step) so your pane and the orchestrator are
+   labelled AND the orchestrator starts polling the PR for merge/close:
    ```
-   set_pr_number({ number: <the PR number>, url: "<the PR url>" })
+   pr_pushed({ prNumber: <the PR number>, url: "<the PR url>" })
    ```
    Get the number/url from the `gh pr create` / `gt submit` output, or
-   `gh pr view --json number,url`.
+   `gh pr view --json number,url`. Call `pr_pushed` only once the branch is
+   actually pushed and the PR exists. (The older `set_pr_number` tool still works
+   for labelling, but `pr_pushed` is the documented final step.)
 
 6. **Report back** with a concise summary: branch, PR number/url, the commits you
    made, how you verified, and any follow-up PRs you recommend the orchestrator
