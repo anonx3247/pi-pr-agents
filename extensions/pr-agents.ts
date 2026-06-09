@@ -123,6 +123,16 @@ function repoRoot(cwd: string): string {
   return git(["rev-parse", "--show-toplevel"], cwd);
 }
 
+/** True when the Graphite CLI (`gt`) is installed and runnable. */
+export function graphiteAvailable(): boolean {
+  try {
+    execFileSync("gt", ["--version"], { stdio: "pipe", timeout: 10000 });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function gitCommonDir(cwd: string): string {
   const d = git(["rev-parse", "--git-common-dir"], cwd);
   return path.resolve(cwd, d);
@@ -168,6 +178,48 @@ function saveState(patch: Partial<UserState>): void {
   const next = { ...loadState(), ...patch };
   try {
     fs.writeFileSync(statePath(), JSON.stringify(next, null, 2));
+  } catch {
+    /* ignore */
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Per-PROJECT config (e.g. the default stacking strategy for this repo)
+//
+// Unlike the per-user state above (~/.pi/pr-agents/state.json), this lives in
+// the repo at <repo-root>/.pi/pr-agents.json so the choice travels with the
+// project. It records ONLY the default strategy used when the orchestrator
+// stacks DEPENDENT PRs: "github" → dispatch_pr mode "stack", "graphite" →
+// mode "graphite". Standalone PRs stay "independent", and an explicit `mode`
+// passed to dispatch_pr always wins. We never touch .gitignore — whether to
+// commit .pi/pr-agents.json is left to the user.
+// ---------------------------------------------------------------------------
+
+export type StackStrategy = "github" | "graphite";
+
+export interface ProjectConfig {
+  strategy?: StackStrategy;
+}
+
+export function projectConfigPath(cwd: string): string {
+  const dir = path.join(repoRoot(cwd), ".pi");
+  fs.mkdirSync(dir, { recursive: true });
+  return path.join(dir, "pr-agents.json");
+}
+
+export function loadProjectConfig(cwd: string): ProjectConfig {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(projectConfigPath(cwd), "utf8"));
+    return parsed && typeof parsed === "object" ? (parsed as ProjectConfig) : {};
+  } catch {
+    return {};
+  }
+}
+
+export function saveProjectConfig(cwd: string, patch: Partial<ProjectConfig>): void {
+  const next = { ...loadProjectConfig(cwd), ...patch };
+  try {
+    fs.writeFileSync(projectConfigPath(cwd), JSON.stringify(next, null, 2));
   } catch {
     /* ignore */
   }
