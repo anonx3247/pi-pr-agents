@@ -74,12 +74,26 @@ pi install npm:pi-lens         # inline diagnostics + LSP/ast-grep in every work
   ```
 - `git` (worktrees), and for opening PRs: `gh` (GitHub) and/or `gt` (Graphite).
 
+### tmux auto-launch (optional)
+
+Because the workflow needs tmux, the first time you start the main agent **outside**
+tmux the package offers to install a shell `pi` wrapper that auto-launches pi inside
+tmux from then on (inside tmux it just runs pi normally). You can run it any time:
+
+```
+/pr-install-tmux-alias
+```
+
+It writes an idempotent, marker-delimited block to `~/.zshrc`, `~/.bashrc`, or
+`~/.config/fish/functions/pi.fish` depending on your shell. Set
+`PI_PR_NO_ALIAS_PROMPT=1` to suppress the offer.
+
 ## Install
 
 ```bash
-pi install /path/to/pi-pr-agents      # local
-# or, once published:
-# pi install npm:@anas/pi-pr-agents
+pi install npm:pi-pr-agents           # from npm
+pi install git:github.com/anonx3247/pi-pr-agents   # from GitHub
+pi install /path/to/pi-pr-agents      # local checkout
 ```
 
 Then start pi inside tmux and just describe the work:
@@ -130,5 +144,27 @@ the main repo and every worktree, so each agent sees the same set of PRs.
 
 - `PI_PR_ALLOW_MAIN_EDITS=1` — let the main agent keep `edit`/`write` (off by
   default; the orchestrator is meant to delegate, not edit).
+- `PI_PR_NO_ALIAS_PROMPT=1` — don't offer to install the tmux `pi` wrapper.
 - `PI_PR_DEPTH` / `PI_PR_SIMPLIFY` — set automatically on dispatched subagents;
   you don't set these by hand.
+
+## Publishing (maintainers)
+
+The package is published to npm as [`pi-pr-agents`](https://www.npmjs.com/package/pi-pr-agents)
+and listed in the [pi gallery](https://pi.dev/packages). pi loads the `.ts`
+extension directly, so there is no build step.
+
+```bash
+npm login
+npm publish            # uses files allowlist + public access from package.json
+```
+
+Or let CI do it: bump `version`, then push a matching tag and GitHub Actions
+(`.github/workflows/publish.yml`) publishes with provenance.
+
+```bash
+npm version patch      # or minor/major; updates package.json + creates the tag
+git push --follow-tags
+```
+
+Requires an `NPM_TOKEN` repo secret (an npm automation token).
