@@ -23,8 +23,8 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { StringEnum } from "@earendil-works/pi-ai";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { Type } from "typebox";
+import type { ExtensionAPI, ToolDefinition } from "@earendil-works/pi-coding-agent";
+import { Type, type TSchema } from "typebox";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const PKG_ROOT = path.resolve(HERE, "..");
@@ -597,6 +597,31 @@ function withEntry(
   return fn(entry);
 }
 
+/**
+ * Register a tool whose body returns the lightweight {@link ToolTextResult}
+ * shape. The agent runtime's `AgentToolResult` requires a `details` field on
+ * every result, so this wrapper fills it in (defaulting to `undefined`) — the
+ * tool bodies stay focused on their text/error/details payload while the
+ * registered tool still satisfies the strict `execute` return type.
+ */
+function registerTextTool<TParams extends TSchema>(
+  pi: ExtensionAPI,
+  def: Omit<ToolDefinition<TParams>, "execute"> & {
+    execute: (
+      ...args: Parameters<ToolDefinition<TParams>["execute"]>
+    ) => ToolTextResult | Promise<ToolTextResult>;
+  },
+): void {
+  const { execute, ...rest } = def;
+  pi.registerTool({
+    ...rest,
+    async execute(id, params, signal, onUpdate, ctx) {
+      const r = await execute(id, params, signal, onUpdate, ctx);
+      return { ...r, details: r.details };
+    },
+  });
+}
+
 interface PaneToolMeta {
   name: string;
   label: string;
@@ -638,7 +663,7 @@ interface PaneControlConfig {
  * `cfg`, so the runtime behaviour is identical to the hand-written tools.
  */
 function registerPaneControlTools(pi: ExtensionAPI, cfg: PaneControlConfig): void {
-  pi.registerTool({
+  registerTextTool(pi, {
     name: cfg.list.name,
     label: cfg.list.label,
     description: cfg.list.description,
@@ -656,7 +681,7 @@ function registerPaneControlTools(pi: ExtensionAPI, cfg: PaneControlConfig): voi
     },
   });
 
-  pi.registerTool({
+  registerTextTool(pi, {
     name: cfg.peek.name,
     label: cfg.peek.label,
     description: cfg.peek.description,
@@ -679,7 +704,7 @@ function registerPaneControlTools(pi: ExtensionAPI, cfg: PaneControlConfig): voi
     },
   });
 
-  pi.registerTool({
+  registerTextTool(pi, {
     name: cfg.send.name,
     label: cfg.send.label,
     description: cfg.send.description,
@@ -698,7 +723,7 @@ function registerPaneControlTools(pi: ExtensionAPI, cfg: PaneControlConfig): voi
     },
   });
 
-  pi.registerTool({
+  registerTextTool(pi, {
     name: cfg.stop.name,
     label: cfg.stop.label,
     description: cfg.stop.description,
@@ -816,7 +841,7 @@ export default function (pi: ExtensionAPI) {
       return { systemPrompt: `${event.systemPrompt}\n\n${header}` };
     });
 
-    pi.registerTool({
+    registerTextTool(pi, {
       name: "dispatch_pr",
       label: "Dispatch PR agent",
       description:
@@ -1020,7 +1045,7 @@ export default function (pi: ExtensionAPI) {
       },
     });
 
-    pi.registerTool({
+    registerTextTool(pi, {
       name: "focus_pr_agent",
       label: "Focus PR agent",
       description: "Move the tmux focus to a PR subagent's pane so you can watch or talk to it.",
@@ -1038,7 +1063,7 @@ export default function (pi: ExtensionAPI) {
       },
     });
 
-    pi.registerTool({
+    registerTextTool(pi, {
       name: "cleanup_pr_worktrees",
       label: "Cleanup PR worktrees",
       description:
@@ -1086,7 +1111,7 @@ export default function (pi: ExtensionAPI) {
   // DEPTH 1 — a PR subagent: can register its PR + spawn helpers
   // =====================================================================
   if (level === 1) {
-    pi.registerTool({
+    registerTextTool(pi, {
       name: "set_pr_number",
       label: "Set PR number",
       description:
@@ -1109,7 +1134,7 @@ export default function (pi: ExtensionAPI) {
       },
     });
 
-    pi.registerTool({
+    registerTextTool(pi, {
       name: "dispatch_helper",
       label: "Dispatch helper subagent",
       description:
