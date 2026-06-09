@@ -324,6 +324,8 @@ function tmuxSetup(): void {
   // Show pane titles so PR panes can be labelled with their PR number/name.
   tryTmux(["set", "-g", "pane-border-status", "top"]);
   tryTmux(["set", "-g", "pane-border-format", " #{pane_title} "]);
+  // Enable mouse so the user can click a pane to focus it and type into it.
+  tryTmux(["set", "-g", "mouse", "on"]);
 }
 
 export function paneTitle(entry: Pick<PrEntry, "prNumber" | "prName" | "branch">): string {
