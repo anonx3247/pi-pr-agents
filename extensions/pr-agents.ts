@@ -1962,7 +1962,19 @@ export default function (pi: ExtensionAPI) {
     // If its pane was already killed (e.g. by /cleanup), new review comments and
     // CI failures are NOT auto-handled — re-spawning dead agents is out of scope.
     if (level === 1 && !reviewPollTimer) {
-      const reviewTick = () => {
+      // Inject a task into a fresh turn: immediately when idle, else queued as a
+      // follow-up so the current turn is never clobbered.
+      const inject = (msg: string) => {
+        if (ctx.isIdle()) pi.sendUserMessage(msg);
+        else pi.sendUserMessage(msg, { deliverAs: "followUp" });
+      };
+
+      // One tick polls BOTH the review-comment loop and the CI-failure loop. They
+      // share the same gate (pushed + numbered + non-terminal), seen-set, and
+      // owner/repo resolution; CI failures are deduped per commit via
+      // ci:<sha>:<name> keys, so a still-failing check after a fix-push re-notifies
+      // (new sha) while a passing run never does.
+      const tick = () => {
         try {
           const myId = process.env.PI_PR_ID;
           if (!myId) return;
@@ -1973,65 +1985,39 @@ export default function (pi: ExtensionAPI) {
           if (entry.pushed !== true || typeof entry.prNumber !== "number") return;
 
           // Seed/refresh the in-memory seen-set from the persisted union so a
-          // restart never reprocesses old comments and the reply tool's writes
-          // are picked up.
+          // restart never reprocesses old comments/failures and the reply tool's
+          // writes are picked up.
           for (const sid of entry.seenReviewIds ?? []) reviewSeen.add(sid);
 
           // Resolve owner/repo once; gh missing/unauth => skip silently.
           if (!reviewRepo) reviewRepo = resolveOwnerRepo(ctx.cwd);
           if (!reviewRepo) return;
 
+          // Review-comment loop: surface (and mark seen) only when there are NEW
+          // actionable comments, so standalone context lingers until it
+          // accompanies real work. Mark seen BEFORE injecting so a slow turn can't
+          // double-surface on the next tick.
           const fetched = fetchReviewActivity(reviewRepo.owner, reviewRepo.repo, entry.prNumber, ctx.cwd);
           const { actionable, contextNotes, newIds } = selectNewReviewItems(fetched, reviewSeen);
-          // Only surface (and mark seen) when there are NEW actionable comments,
-          // so standalone context lingers until it accompanies real work.
-          if (actionable.length === 0) return;
-          // Mark every surfaced id seen BEFORE injecting so a slow turn can't
-          // double-surface them on the next tick.
-          for (const nid of newIds) reviewSeen.add(nid);
-          mergeSeenReviewIds(ctx.cwd, myId, newIds);
-          const msg = buildReviewTask(actionable, contextNotes, entry.prNumber);
-          if (ctx.isIdle()) pi.sendUserMessage(msg);
-          else pi.sendUserMessage(msg, { deliverAs: "followUp" });
-        } catch {
-          // Never let a gh/network/notification failure break the poll loop.
-        }
-      };
+          if (actionable.length > 0) {
+            for (const nid of newIds) reviewSeen.add(nid);
+            mergeSeenReviewIds(ctx.cwd, myId, newIds);
+            inject(buildReviewTask(actionable, contextNotes, entry.prNumber));
+          }
 
-      // Folded into the SAME tick: poll CI status for THIS PR and, when checks
-      // fail, inject a fix task. Deduped per commit via ci:<sha>:<name> keys in
-      // the same seen-set, so a still-failing check after a fix-push re-notifies
-      // (new sha) while a passing run never does.
-      const ciTick = () => {
-        try {
-          const myId = process.env.PI_PR_ID;
-          if (!myId) return;
-          const entry = loadRegistry(ctx.cwd).find((e) => e.id === myId);
-          if (!entry || entry.status === "merged" || entry.status === "closed" || entry.status === "stopped") return;
-          if (entry.pushed !== true || typeof entry.prNumber !== "number") return;
-
-          for (const sid of entry.seenReviewIds ?? []) reviewSeen.add(sid);
-          if (!reviewRepo) reviewRepo = resolveOwnerRepo(ctx.cwd);
-          if (!reviewRepo) return;
-
+          // CI-failure loop: surface NEW failures for the current head commit.
           const ci = fetchCiChecks(entry.prNumber, ctx.cwd);
-          if (!ci) return;
-          const { failures, newKeys } = selectNewCiFailures(ci.checks, ci.headSha, reviewSeen);
-          if (failures.length === 0) return;
-          // Mark seen BEFORE injecting so a slow turn can't double-surface them.
-          for (const k of newKeys) reviewSeen.add(k);
-          mergeSeenReviewIds(ctx.cwd, myId, newKeys);
-          const msg = buildCiFixTask(failures, entry.prNumber);
-          if (ctx.isIdle()) pi.sendUserMessage(msg);
-          else pi.sendUserMessage(msg, { deliverAs: "followUp" });
+          if (ci) {
+            const { failures, newKeys } = selectNewCiFailures(ci.checks, ci.headSha, reviewSeen);
+            if (failures.length > 0) {
+              for (const k of newKeys) reviewSeen.add(k);
+              mergeSeenReviewIds(ctx.cwd, myId, newKeys);
+              inject(buildCiFixTask(failures, entry.prNumber));
+            }
+          }
         } catch {
           // Never let a gh/network/notification failure break the poll loop.
         }
-      };
-
-      const tick = () => {
-        reviewTick();
-        ciTick();
       };
       tick();
       reviewPollTimer = setInterval(tick, REVIEW_POLL_MS);
