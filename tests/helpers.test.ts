@@ -27,6 +27,7 @@ import {
   statusMarker,
   updateEntry,
   windowName,
+  worktreesDirFrom,
 } from "../extensions/pr-agents.ts";
 
 describe("slugify", () => {
@@ -597,5 +598,12 @@ describe("registry round-trip", () => {
 
   test("loadRegistry returns [] when no registry file exists", () => {
     assert.deepEqual(loadRegistry(dir), []);
+  });
+});
+
+describe("worktreesDirFrom", () => {
+  test("nests .worktrees inside the repo root, not a sibling dir", () => {
+    const root = "/a/b/repo";
+    assert.equal(worktreesDirFrom(root), path.join(root, ".worktrees"));
   });
 });
