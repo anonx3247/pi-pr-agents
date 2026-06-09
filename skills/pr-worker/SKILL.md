@@ -30,10 +30,11 @@ git commit -m "<type>: <concise description>"
 1. **Implement** the task, committing atomically as you go.
 2. **Verify**: run the project's tests/build/lint. Fix and re-commit until green.
 3. **Simplify (if requested)**: if `PI_PR_SIMPLIFY=1` (the orchestrator opted in),
-   call the `simplify_diff` tool (it runs `/simplify` for you, since an autonomous
-   agent can't invoke a slash command directly) to tidy the changed code, then
-   commit the result as its own atomic commit (e.g. `refactor: simplify`).
-   Requires pi-simplify.
+   call the `simplify_diff` tool; it returns a simplification task (the changed
+   files vs your PR base + guidance) as its result. Apply those simplifications
+   **in the same turn**, run tests, commit them as an atomic `refactor: simplify`
+   commit, then continue. Do **not** sleep/poll or expect a separate command to
+   run. Requires pi-simplify.
 4. **Push and open the PR**, according to your mode:
 
    ### mode = independent  (plain GitHub PR off the base branch)
@@ -93,7 +94,7 @@ and `stop_helper({id, mode})` (interrupt or kill). Helpers cannot spawn further 
   research while implementing.
 - **pi-lens** — inline diagnostics and LSP/ast-grep navigation; active in this
   worktree automatically. Heed its feedback.
-- **pi-simplify** — `/simplify` (see step 3 above).
+- **pi-simplify** — powers the inline `simplify_diff` task (see step 3 above).
 
 ## Boundaries
 

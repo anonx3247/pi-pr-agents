@@ -20,9 +20,11 @@ Non-negotiable rules:
    change when they exist. Keep each commit green.
 
 4. **Simplify if asked.** If the environment variable `PI_PR_SIMPLIFY=1`, call
-   the `simplify_diff` tool (which runs `/simplify` on your diff — an autonomous
-   agent can't invoke a slash command directly) before opening the PR, then
-   review and commit the result as its own atomic commit.
+   the `simplify_diff` tool before opening the PR. It returns an inline
+   simplification task (changed files vs your PR base + guidance) as its result —
+   act on it immediately, in the same turn: apply the changes, run tests, and
+   commit the result as its own atomic `refactor: simplify` commit. Do not wait
+   for any separate command to run.
 
 5. **Open the PR, then signal it.** When the work is ready, push your branch and
    open the pull request (plain GitHub or Graphite — see the pr-worker skill for
