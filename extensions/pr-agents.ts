@@ -23,8 +23,9 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { StringEnum } from "@earendil-works/pi-ai";
-import type { ExtensionAPI, ToolDefinition } from "@earendil-works/pi-coding-agent";
-import { truncateToWidth } from "@earendil-works/pi-tui";
+import type { ExtensionAPI, ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
+import { DynamicBorder } from "@earendil-works/pi-coding-agent";
+import { Container, Key, type SelectItem, SelectList, Text, truncateToWidth } from "@earendil-works/pi-tui";
 import { type TSchema, Type } from "typebox";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -1519,6 +1520,57 @@ export function statusMarker(status: PrEntry["status"], alive: boolean, working:
 }
 
 /**
+ * One selectable row in the "dock a PR agent" picker overlay. Built purely from
+ * a registry snapshot + injected liveness/working/docked info so it can be
+ * unit-tested without tmux. `value` is the agent's tmux pane id (what
+ * `dockAgent` needs); `label`/`description` are the rendered SelectList text.
+ */
+export interface AgentPickerItem {
+  /** The agent's tmux pane id — passed straight to dockAgent on confirm. */
+  value: string;
+  id: string;
+  docked: boolean;
+  marker: StatusMarker;
+  label: string;
+  description: string;
+}
+
+/**
+ * Build the selectable list model for the dock picker from a registry snapshot.
+ * Filters to LIVE depth-1 PR agents (via the injected `isAlive`), derives each
+ * row's status marker exactly like the widget (statusMarker + injected
+ * `isWorking`), marks the currently docked agent with a "(docked)" suffix, and
+ * formats a one-line label (icon + status + id + PR + name). Pure: no tmux/UI IO
+ * — all liveness/working/docked facts are injected so it is unit-testable.
+ */
+export function buildAgentPickerItems(
+  entries: readonly PrEntry[],
+  opts: {
+    isAlive: (paneId: string) => boolean;
+    isWorking: (paneId: string) => boolean;
+    dockedPaneId?: string;
+  },
+): AgentPickerItem[] {
+  const items: AgentPickerItem[] = [];
+  for (const e of entries) {
+    if (e.depth !== 1 || !e.paneId || !opts.isAlive(e.paneId)) continue;
+    const marker = statusMarker(e.status, true, opts.isWorking(e.paneId));
+    const docked = e.paneId === opts.dockedPaneId;
+    const pr = e.prNumber !== undefined ? `PR #${e.prNumber}` : "pending";
+    const suffix = docked ? " (docked)" : "";
+    items.push({
+      value: e.paneId,
+      id: e.id,
+      docked,
+      marker,
+      label: `${marker.icon} ${marker.label.padEnd(7)} ${e.id}  ${pr}  ${e.prName}${suffix}`,
+      description: e.branch,
+    });
+  }
+  return items;
+}
+
+/**
  * Latest commit title in a PR worktree, or "(no commits yet)" when the branch
  * has no commits beyond its base. Falls back safely if git fails.
  */
@@ -2120,23 +2172,85 @@ export default function (pi: ExtensionAPI) {
       },
     });
 
-    pi.registerCommand("pr-agents", {
-      description: "List dispatched PR subagents",
-      handler: async (_args, ctx) => {
-        const entries = loadRegistry(ctx.cwd);
-        if (entries.length === 0) {
-          ctx.ui.notify("No PR agents dispatched yet.", "info");
+    // Open an anchored overlay listing the LIVE PR agents and dock the chosen
+    // one to the RIGHT of the orchestrator (via the existing dockAgent, which
+    // auto-undocks the previous one). Shared by the /pr-agents command and the
+    // hotkey. Never throws: every failure degrades to a notify.
+    const openDockPicker = async (ctx: ExtensionContext): Promise<void> => {
+      try {
+        if (!ctx.hasUI) return;
+        if (!insideTmux() || !orchestratorPane) {
+          ctx.ui.notify("Docking a PR agent requires running pi inside tmux.", "info");
           return;
         }
-        const text = entries
-          .map((e) => {
-            const pr = e.prNumber !== undefined ? `#${e.prNumber}` : "(pending)";
-            const alive = paneAlive(e.paneId) ? "live" : "ended";
-            return `${e.id} ${pr} ${e.prName} — ${e.branch} [${e.mode}/${e.status}/${alive}]`;
-          })
-          .join("\n");
-        ctx.ui.notify(text, "info");
-      },
+        const items = buildAgentPickerItems(loadRegistry(ctx.cwd), {
+          isAlive: paneAlive,
+          // Match the widget: scan a wide tail so the activity line is detected.
+          isWorking: (paneId) => isWorkingSnapshot(capturePane(paneId, 40)),
+          dockedPaneId,
+        });
+        if (items.length === 0) {
+          ctx.ui.notify("No live PR agents", "info");
+          return;
+        }
+        const selectItems: SelectItem[] = items.map((it) => ({
+          value: it.value,
+          label: it.label,
+          description: it.description,
+        }));
+
+        const chosen = await ctx.ui.custom<string | null>(
+          (tui, theme, _kb, done) => {
+            const container = new Container();
+            container.addChild(new DynamicBorder((s: string) => theme.fg("accent", s)));
+            container.addChild(new Text(theme.fg("accent", theme.bold("Dock a PR agent on the right")), 1, 0));
+            const selectList = new SelectList(selectItems, Math.min(selectItems.length, 10), {
+              selectedPrefix: (t) => theme.fg("accent", t),
+              selectedText: (t) => theme.fg("accent", t),
+              description: (t) => theme.fg("muted", t),
+              scrollInfo: (t) => theme.fg("dim", t),
+              noMatch: (t) => theme.fg("warning", t),
+            });
+            selectList.onSelect = (item) => done(item.value);
+            selectList.onCancel = () => done(null);
+            container.addChild(selectList);
+            container.addChild(new Text(theme.fg("dim", "↑↓ navigate • enter dock • esc cancel"), 1, 0));
+            container.addChild(new DynamicBorder((s: string) => theme.fg("accent", s)));
+            return {
+              render: (w) => container.render(w),
+              invalidate: () => container.invalidate(),
+              handleInput: (data) => {
+                selectList.handleInput(data);
+                tui.requestRender();
+              },
+            };
+          },
+          {
+            overlay: true,
+            overlayOptions: { anchor: "right-center", width: "45%", minWidth: 36, maxHeight: "80%" },
+          },
+        );
+
+        if (!chosen) return;
+        dockAgent(ctx.cwd, chosen);
+        const entry = entryByPane(ctx.cwd, chosen);
+        ctx.ui.notify(`Docked ${entry ? entry.prName : chosen} on the right.`, "info");
+      } catch {
+        // Never throw out of a command/shortcut handler.
+        ctx.ui.notify("Could not open the PR-agent dock picker.", "warning");
+      }
+    };
+
+    pi.registerCommand("pr-agents", {
+      description: "Pick which live PR agent docks to the right of the orchestrator",
+      handler: async (_args, ctx) => openDockPicker(ctx),
+    });
+
+    // Hotkey for the same picker. ctrl+alt+a is unobtrusive and unbound by the
+    // default keymap (see docs/keybindings.md); users can rebind via keybindings.
+    pi.registerShortcut(Key.ctrlAlt("a"), {
+      description: "Dock a PR agent to the right (PR-agents picker)",
+      handler: async (ctx) => openDockPicker(ctx),
     });
   }
 
