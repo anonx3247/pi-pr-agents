@@ -17,9 +17,12 @@ model and the full command reference so an agent can drive `gt` confidently.
 - **trunk** is the main/master branch. You configure it once with `gt init`
   (stored in `.git/.graphite_repo_config`). `gt` needs trunk so it knows where
   PRs merge into and how to sync from `origin`.
-- Graphite treats **branches like commits**. Where in plain git you'd add several
-  commits to one branch, in Graphite you make several **branches**, typically
-  **one commit per branch** — each an atomic, reviewable changeset.
+- **PRs are a higher level of abstraction than commits — not a replacement for
+  them.** Commits record the *edit history* (every small decision and bugfix); a
+  PR/branch records a *step of the implementation* (a milestone). In Graphite you
+  still commit normally — you just split the work into a sequence of small
+  branches, one per logical step, and each branch can hold as many commits as it
+  takes to get that step right.
   - **downstack** = toward trunk (a branch's ancestors / parents).
   - **upstack** = away from trunk (a branch's descendants / children).
 - **Automatic restacking is the key idea.** When you edit a branch lower in the
@@ -37,10 +40,13 @@ gt init                  # interactive; pick trunk
 gt init --trunk main     # non-interactive
 ```
 
-### Create branches (instead of committing)
+### Create a branch for each step
 
-Make your changes on top of the current branch, then create a tracked branch from
-them. **Don't** pre-create an empty branch — change first, then `gt create`.
+You still commit as normal — `gt create` makes a new tracked branch **and**
+commits your staged changes onto it in one step. Make your changes on top of the
+current branch, then create the branch from them. **Don't** pre-create an empty
+branch — change first, then `gt create`. Add further commits to the same branch
+as you iterate with `gt modify`.
 
 ```bash
 gt add -A                       # stage, then…
@@ -72,6 +78,10 @@ gt submit --dry-run                    # preview
 Useful flags: `-r/--reviewers`, `-d/--draft`, `--no-interactive`,
 `-u/--update-only`, `--dry-run`, `-c/--confirm`. `gt submit` validates that
 everything is restacked and **fails on conflicts**.
+
+> In pi-pr-agents the **main agent** runs `gt submit --stack` so the whole stack
+> is created/updated together — that is what keeps every PR's base correct **and
+> updates the Graphite web UI**. See *Using `gt` with pi-pr-agents* below.
 
 ### Address review feedback on a lower branch
 
@@ -225,26 +235,51 @@ Official docs: <https://graphite.com/docs/command-reference> and
 
 ## Using `gt` with pi-pr-agents
 
-This skill plugs into the PR-agent workflow:
+In pi-pr-agents **every branch gets its own git worktree**:
+`dispatch_pr({ mode: "graphite", stack_on: "<prev PR/branch>" })` runs
+`git worktree add -b <branch> <worktree> <base>`, branching each PR off the
+previous PR's branch. So the branches are created **separately** (by git, one per
+worktree) and then **tracked and restacked** with `gt` — Graphite doesn't have to
+build them all in a single checkout.
 
-- The orchestrator dispatches Graphite PRs with
-  `dispatch_pr({ mode: "graphite", stack_on: "<prev PR/branch>" })`. **Dispatch
-  and merge bottom-up**, and never stack on an un-dispatched branch.
-- A PR-worker (subagent) on a Graphite branch should ensure its branch is tracked,
-  then submit the stack non-interactively:
-  ```bash
-  gt track --parent "$PI_PR_BASE" "$PI_PR_BRANCH"   # if not already tracked
-  gt submit --no-interactive --stack
-  ```
-  Or build from scratch with `gt create -m "..."` per commit instead of raw
-  `git commit`.
-- Because restacking is **automatic**, when a lower PR changes, run `gt restack`
-  (or just `gt modify`, which restacks for you) and re-run
-  `gt submit --no-interactive --stack`. **Do not hand-rebase.**
-- After a stack lands, run `/cleanup` (pi-pr-agents) to remove merged
-  worktrees/branches/panes, and `gt sync` to tidy the local stack and delete
-  merged branches.
-- **Non-interactive note:** in automated/subagent contexts always pass
-  `--no-interactive` (or `--quiet`) and avoid commands that need an interactive
-  editor/selector (e.g. `gt reorder`, bare `gt checkout`) unless you give them
-  explicit arguments.
+### Main agent (orchestrator) — owns the stack
+
+Working in the main repo, the orchestrator:
+
+- runs `gt init` once if the repo isn't initialised;
+- dispatches Graphite PRs **bottom-up**, each `stack_on` the previous branch, and
+  never stacks on an un-dispatched branch;
+- runs `gt submit --no-interactive --stack` to create/update the **whole** stack
+  at once — this keeps every PR's base correct **and updates the Graphite web
+  UI**;
+- owns all cross-stack operations — `gt restack`, `gt sync`, `gt merge`,
+  navigation (`gt up`/`down`/`checkout`) and reorg (`gt move`/`reorder`/…);
+- merges **bottom-up**, then after the stack lands runs `/cleanup` (pi-pr-agents)
+  for worktrees/branches/panes and `gt sync` to delete merged branches locally.
+
+### PR-worker (subagent) — stays in its own branch worktree
+
+A worker does **not** navigate or reorganise the stack, and does **not** run
+`gt create` (its branch already exists). It just registers its branch with
+Graphite and submits **its own** branch:
+
+```bash
+gt track --parent "$PI_PR_BASE" "$PI_PR_BRANCH"   # if not already tracked
+gt submit --no-interactive                         # its own branch (base = $PI_PR_BASE)
+```
+
+Iterate on review feedback with `gt modify` (amend) or `gt modify -cam "msg"`
+(new commit). **Never hand-rebase.** Note that `gt restack`/`gt modify` **skip
+branches checked out in other worktrees**, so cross-branch restacking after a
+lower PR changes is coordinated by the **main agent's** `gt submit --stack`, not
+by the worker.
+
+> **Open design question (out of scope for this docs PR):** `mode: "graphite"`
+> already exists on `dispatch_pr` (the GitHub modes are `independent`/`stack`).
+> Whether to add a project-level stored setting (e.g. in `project/.pi`) that
+> selects GitHub vs Graphite and prompts the user is a reasonable follow-up.
+
+**Non-interactive note:** in automated/subagent contexts always pass
+`--no-interactive` (or `--quiet`) and avoid commands that need an interactive
+editor/selector (e.g. `gt reorder`, bare `gt checkout`) unless you give them
+explicit arguments.
