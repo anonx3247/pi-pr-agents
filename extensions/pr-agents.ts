@@ -760,10 +760,44 @@ function buildHelperCommand(parentId: string, name: string, task: string): strin
 // Worktree helpers
 // ---------------------------------------------------------------------------
 
+/**
+ * Pure helper: given a repo root, return the directory where PR/helper
+ * worktrees live. They are nested under `<repo-root>/.worktrees` so that every
+ * write stays inside the repo root (allowing the user to sandbox writes to the
+ * repo). Kept pure (no git/fs) so it can be unit-tested directly.
+ */
+export function worktreesDirFrom(root: string): string {
+  return path.join(root, ".worktrees");
+}
+
 function worktreesDir(cwd: string): string {
-  const root = repoRoot(cwd);
-  const name = path.basename(root);
-  return path.join(path.dirname(root), `${name}.worktrees`);
+  return worktreesDirFrom(repoRoot(cwd));
+}
+
+/**
+ * Best-effort: make sure `.worktrees/` is ignored in this repo so the nested
+ * worktree directory never clutters `git status`. We append to the repo's
+ * `<git-common-dir>/info/exclude` (local, uncommitted) rather than `.gitignore`
+ * so it works in ANY repo the tool runs in. Idempotent and never throws — a
+ * failure here must not block dispatch.
+ */
+function ensureWorktreesIgnored(root: string): void {
+  try {
+    const excludePath = path.join(gitCommonDir(root), "info", "exclude");
+    let current = "";
+    try {
+      current = fs.readFileSync(excludePath, "utf8");
+    } catch {
+      // file may not exist yet; we'll create it below
+    }
+    const lines = current.split("\n").map((l) => l.trim());
+    if (lines.includes(".worktrees/")) return;
+    const prefix = current.length > 0 && !current.endsWith("\n") ? "\n" : "";
+    fs.mkdirSync(path.dirname(excludePath), { recursive: true });
+    fs.appendFileSync(excludePath, `${prefix}.worktrees/\n`);
+  } catch {
+    // ignore: keeping git status clean is best-effort
+  }
 }
 
 export function uniqueBranch(cwd: string, desired: string): string {
@@ -866,6 +900,8 @@ function runCleanup(cwd: string, dryRun: boolean): CleanupResult {
     if (!m) continue;
     const wt = m[1];
     if (wt === root) continue;
+    // Matches both the OLD sibling layout (`<name>.worktrees/`) and the NEW
+    // nested layout (`<root>/.worktrees/`), since both contain `.worktrees/`.
     if (!wt.includes(`.worktrees${path.sep}`) && !wt.includes(".worktrees/")) continue;
     if (survivors.some((s) => s.worktree === wt)) continue;
     if (entries.some((e) => e.worktree === wt)) continue; // handled above
@@ -1410,6 +1446,9 @@ export default function (pi: ExtensionAPI) {
         }
 
         const branch = uniqueBranch(cwd, params.branch ?? `pi/pr-${slugify(params.pr_name)}`);
+        // Worktrees now live at `<root>/.worktrees/<slug>`; keep that dir out of
+        // git status before creating anything inside the repo.
+        ensureWorktreesIgnored(root);
         const wtDir = worktreesDir(cwd);
         fs.mkdirSync(wtDir, { recursive: true });
         const worktree = path.join(wtDir, slugify(branch));
