@@ -24,7 +24,6 @@ import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { StringEnum } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
-import { DynamicBorder } from "@earendil-works/pi-coding-agent";
 import { Container, Key, type SelectItem, SelectList, Text, truncateToWidth } from "@earendil-works/pi-tui";
 import { type TSchema, Type } from "typebox";
 
@@ -2198,6 +2197,12 @@ export default function (pi: ExtensionAPI) {
           label: it.label,
           description: it.description,
         }));
+
+        // Load DynamicBorder lazily: importing a runtime value from
+        // @earendil-works/pi-coding-agent at module top-level pulls undici into
+        // the (Node-only) test process, which crashes on some Node versions.
+        // A dynamic import inside the UI-only handler keeps the test graph clean.
+        const { DynamicBorder } = await import("@earendil-works/pi-coding-agent");
 
         const chosen = await ctx.ui.custom<string | null>(
           (tui, theme, _kb, done) => {
