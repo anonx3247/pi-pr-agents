@@ -98,6 +98,23 @@ comment is ambiguous or architectural, reply asking for clarification rather tha
 guessing. (Known limitation: this only works while your pane/process is alive; if
 it was already cleaned up, new comments won't be auto-handled.)
 
+## CI-failure loop (auto-fix when checks fail)
+
+The same background poller also watches your PR's **CI checks**. When a check
+fails on your PR's head commit it hands you a fresh task listing each failing
+check and asks you to:
+
+1. Reproduce the failure locally by running the gate
+   (`npm run typecheck && npm run lint && npm test`).
+2. Fix the cause, commit (e.g. `fix: resolve CI failure`), and `git push`.
+3. If the failure is environment-specific or unclear from the gate, inspect logs
+   with `gh run view --log-failed` (find the run via `gh run list --branch <branch>`).
+
+**Never disable or weaken checks to make CI pass.** Failures are deduped once per
+commit (key `ci:<headSha>:<name>`), so after you push a fix a still-failing check
+re-notifies (new sha) and a passing run never does. Same known limitation: this
+only runs while your pane/process is alive.
+
 ## Helpers (optional, one level only)
 
 For a focused sub-task you may spawn a helper in this same worktree:

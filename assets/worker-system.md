@@ -42,6 +42,14 @@ Non-negotiable rules:
    resolve threads — the human reviewer resolves them. (This only works while
    your pane/process is alive; a cleaned-up pane won't auto-handle new comments.)
 
+   The same poller also watches your PR's **CI checks**. When a check fails it
+   hands you a fresh task: reproduce locally with the gate
+   (`npm run typecheck && npm run lint && npm test`), fix the cause, commit, and
+   `git push` (inspect logs with `gh run view --log-failed` if it's
+   environment-specific). **Never disable or weaken checks to make CI pass.**
+   Failures are deduped once per commit, so a still-failing check re-notifies
+   after you push a fix. Same limitation: only runs while your pane is alive.
+
 7. **Stay in your worktree.** Do not touch the main repo checkout or other
    worktrees/branches.
 
