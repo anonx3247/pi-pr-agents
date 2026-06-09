@@ -101,6 +101,161 @@ function defaultBranch(cwd: string): string {
 }
 
 // ---------------------------------------------------------------------------
+// Persistent per-user state (e.g. "already offered the tmux alias")
+// ---------------------------------------------------------------------------
+
+interface UserState {
+  aliasPrompted?: boolean;
+  aliasInstalledAt?: string;
+}
+
+function statePath(): string {
+  const dir = path.join(os.homedir(), ".pi", "pr-agents");
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+  } catch {
+    /* ignore */
+  }
+  return path.join(dir, "state.json");
+}
+
+function loadState(): UserState {
+  try {
+    return JSON.parse(fs.readFileSync(statePath(), "utf8")) as UserState;
+  } catch {
+    return {};
+  }
+}
+
+function saveState(patch: Partial<UserState>): void {
+  const next = { ...loadState(), ...patch };
+  try {
+    fs.writeFileSync(statePath(), JSON.stringify(next, null, 2));
+  } catch {
+    /* ignore */
+  }
+}
+
+// ---------------------------------------------------------------------------
+// tmux wrapper alias installer
+//
+// Installs a shell `pi` function so that running `pi` outside tmux launches it
+// inside a tmux session (creating/attaching one named after the cwd). Inside
+// tmux it just runs the real pi. This makes the PR-pane workflow the default.
+// ---------------------------------------------------------------------------
+
+const ALIAS_BEGIN = "# >>> pi-pr-agents tmux wrapper >>>";
+const ALIAS_END = "# <<< pi-pr-agents tmux wrapper <<<";
+
+type ShellKind = "zsh" | "bash" | "fish" | "unknown";
+
+function detectShell(): ShellKind {
+  const s = (process.env.SHELL ?? "").toLowerCase();
+  if (s.includes("zsh")) return "zsh";
+  if (s.includes("bash")) return "bash";
+  if (s.includes("fish")) return "fish";
+  return "unknown";
+}
+
+function shellRcPath(kind: ShellKind): string | undefined {
+  const home = os.homedir();
+  switch (kind) {
+    case "zsh":
+      return path.join(home, ".zshrc");
+    case "bash":
+      return fs.existsSync(path.join(home, ".bashrc")) ? path.join(home, ".bashrc") : path.join(home, ".bash_profile");
+    case "fish":
+      return path.join(home, ".config", "fish", "functions", "pi.fish");
+    default:
+      return undefined;
+  }
+}
+
+function aliasBlock(kind: ShellKind): string {
+  if (kind === "fish") {
+    return [
+      ALIAS_BEGIN,
+      "function pi --wraps pi --description 'Run pi inside tmux (pi-pr-agents)'",
+      "    if set -q TMUX",
+      "        command pi $argv",
+      "    else",
+      "        set -l _sess 'pi-'(basename $PWD | tr -c 'A-Za-z0-9_-' '_')",
+      "        command tmux new-session -A -s $_sess (command -v pi) $argv",
+      "    end",
+      "end",
+      ALIAS_END,
+      "",
+    ].join("\n");
+  }
+  // bash / zsh
+  return [
+    ALIAS_BEGIN,
+    "pi() {",
+    '  if [ -n "$TMUX" ]; then',
+    '    command pi "$@"',
+    "  else",
+    "    local _pi _sess",
+    '    _pi="$(command -v pi)"',
+    `    _sess="pi-$(basename "$PWD" | tr -c 'A-Za-z0-9_-' '_')"`,
+    '    command tmux new-session -A -s "$_sess" "$_pi" "$@"',
+    "  fi",
+    "}",
+    ALIAS_END,
+    "",
+  ].join("\n");
+}
+
+function aliasInstalled(rc: string): boolean {
+  try {
+    return fs.readFileSync(rc, "utf8").includes(ALIAS_BEGIN);
+  } catch {
+    return false;
+  }
+}
+
+interface InstallResult {
+  ok: boolean;
+  rc?: string;
+  shell: ShellKind;
+  message: string;
+}
+
+function installTmuxAlias(): InstallResult {
+  const shell = detectShell();
+  const rc = shellRcPath(shell);
+  if (!rc) {
+    return {
+      ok: false,
+      shell,
+      message:
+        "Could not detect a supported shell (zsh/bash/fish). Add a `pi` wrapper manually that runs `tmux new-session -A -s pi pi`.",
+    };
+  }
+  try {
+    if (aliasInstalled(rc)) {
+      return { ok: true, rc, shell, message: `Already installed in ${rc}.` };
+    }
+    fs.mkdirSync(path.dirname(rc), { recursive: true });
+    const block = aliasBlock(shell);
+    if (shell === "fish") {
+      fs.writeFileSync(rc, block); // standalone function file
+    } else {
+      const prefix = fs.existsSync(rc) ? "\n" : "";
+      fs.appendFileSync(rc, prefix + block);
+    }
+    saveState({ aliasInstalledAt: new Date().toISOString() });
+    return {
+      ok: true,
+      rc,
+      shell,
+      message: `Installed pi tmux wrapper in ${rc}. Restart your shell or run: source ${rc}`,
+    };
+  } catch (err) {
+    return { ok: false, rc, shell, message: `Failed to write ${rc}: ${(err as Error).message}` };
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Registry (shared across worktrees)
 // ---------------------------------------------------------------------------
 
@@ -430,7 +585,40 @@ export default function (pi: ExtensionAPI) {
       const active = pi.getActiveTools().filter((t) => t !== "edit" && t !== "write");
       pi.setActiveTools(active);
     }
-    void ctx;
+
+    // One-time offer (depth 0, has UI, started outside tmux): install a shell
+    // `pi` wrapper so future runs launch inside tmux automatically. The PR-pane
+    // workflow needs tmux, so we make it the default if the user agrees.
+    if (level === 0 && ctx.hasUI && !insideTmux() && !process.env.PI_PR_NO_ALIAS_PROMPT) {
+      const state = loadState();
+      if (!state.aliasPrompted) {
+        const shell = detectShell();
+        const rc = shellRcPath(shell);
+        const already = rc ? aliasInstalled(rc) : false;
+        if (!already) {
+          const ok = await ctx.ui.confirm(
+            "Install pi tmux wrapper?",
+            "pi-pr-agents runs each PR subagent in its own tmux pane, so pi should run inside tmux.\n\n" +
+              `Install a \`pi\` shell function in ${rc ?? "your shell config"} that auto-launches pi inside tmux when you're not already in it? (You can re-run it later with /pr-install-tmux-alias.)`,
+          );
+          if (ok) {
+            const res = installTmuxAlias();
+            ctx.ui.notify(res.message, res.ok ? "info" : "warning");
+          }
+        }
+        saveState({ aliasPrompted: true });
+      }
+    }
+  });
+
+  // Manual (re)install command, available everywhere.
+  pi.registerCommand("pr-install-tmux-alias", {
+    description: "Install a shell `pi` wrapper that launches pi inside tmux",
+    handler: async (_args, ctx) => {
+      const res = installTmuxAlias();
+      saveState({ aliasPrompted: true });
+      ctx.ui.notify(res.message, res.ok ? "info" : "warning");
+    },
   });
 
   // =====================================================================
