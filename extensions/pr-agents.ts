@@ -323,11 +323,12 @@ export interface PrEntry {
   lastResult?: string;
   lastResultAt?: string;
   resultSeq?: number;
-  // Set by a PR subagent (depth 1) review poller + reply tool: the set of review
-  // activity ids already surfaced/handled, keyed distinctly (rc:<id> inline
-  // comments, rv:<...> review summaries, ic:<...> issue comments). Persisted as a
-  // UNION so a restart never reprocesses old comments and the bot's own replies
-  // (recorded here immediately) are never re-surfaced as new.
+  // Set by a PR subagent (depth 1) review poller + CI poller + reply tool: the
+  // set of ids already surfaced/handled, keyed distinctly (rc:<id> inline
+  // comments, rv:<...> review summaries, ic:<...> issue comments, and
+  // ci:<headSha>:<name> CI failures). Persisted as a UNION so a restart never
+  // reprocesses old comments, a CI failure is surfaced once per commit, and the
+  // bot's own replies (recorded here immediately) are never re-surfaced as new.
   seenReviewIds?: string[];
 }
 
@@ -770,6 +771,168 @@ export function buildReviewTask(
     ].join(" "),
   );
   return lines.join("\n");
+}
+
+// ---------------------------------------------------------------------------
+// CI-failure loop (depth 1, subagent-owned)
+// ---------------------------------------------------------------------------
+// Folded into the SAME poll tick as the review loop: once THIS PR is pushed, the
+// subagent also reads its CI check status and, when checks FAIL, injects a task
+// to reproduce the failure locally (with the same gate CI runs), fix it, commit,
+// and push. Failures are deduped ONCE PER COMMIT via `ci:<headSha>:<name>` keys
+// (stored in the same seen-set as review ids), so a still-failing check after a
+// fix-push gets a new sha => new key => re-notifies, while a passing run never
+// notifies. The selection of NEW failures and the task message are kept pure (no
+// gh/exec/IO) so they can be unit-tested.
+
+/** A single CI check on the PR's head commit (gh pr checks --json ...). */
+export interface CiCheck {
+  name: string;
+  /** Raw state, e.g. failure/cancelled/timed_out/action_required/success/pending. */
+  state: string;
+  /** gh's coarse bucket: one of pass/fail/pending/skipping. */
+  bucket: string;
+  /** Details URL for the check run. */
+  link: string;
+}
+
+/** A failing CI check surfaced to the subagent. */
+export interface CiFailure {
+  name: string;
+  state: string;
+  link: string;
+}
+
+/** Result of {@link selectNewCiFailures}: the failures + their seen-keys. */
+export interface NewCiSelection {
+  failures: CiFailure[];
+  newKeys: string[];
+}
+
+/**
+ * Select the NEW CI failures for the PR's current head commit against the
+ * seen-set. Only `bucket === "fail"` checks count as failures (pending/pass/
+ * skipping are ignored). Each failure is keyed `ci:<headSha>:<name>` so it is
+ * deduped ONCE PER COMMIT: after a fix-push the head sha changes, so a check
+ * that is still failing produces a NEW key and re-surfaces, while a passing run
+ * never produces a key. Returns only failures whose key is not already seen.
+ * Pure: no IO.
+ */
+export function selectNewCiFailures(
+  checks: readonly CiCheck[],
+  headSha: string,
+  seen: ReadonlySet<string>,
+): NewCiSelection {
+  const failures: CiFailure[] = [];
+  const newKeys: string[] = [];
+  for (const c of checks) {
+    if (c.bucket !== "fail") continue;
+    const key = `ci:${headSha}:${c.name}`;
+    if (seen.has(key) || newKeys.includes(key)) continue;
+    failures.push({ name: c.name, state: c.state, link: c.link });
+    newKeys.push(key);
+  }
+  return { failures, newKeys };
+}
+
+/**
+ * Build the task message handed to the subagent when CI fails. Lists each
+ * failing check as `- <name> (<state>) <link>` plus the fixed instructions:
+ * reproduce locally with the gate, fix, commit, push, and (if needed) inspect
+ * logs — never weaken checks to make CI pass. Pure: no IO.
+ */
+export function buildCiFixTask(failures: readonly CiFailure[], prNumber: number): string {
+  const lines: string[] = [`CI is failing on PR #${prNumber}. The following checks failed:`, ""];
+  for (const f of failures) {
+    const link = f.link ? ` ${f.link}` : "";
+    lines.push(`- ${f.name} (${f.state})${link}`);
+  }
+  lines.push(
+    "",
+    [
+      "Reproduce locally by running the gate — `npm run typecheck && npm run lint && npm test` — fix the",
+      "cause, commit (e.g. `fix: resolve CI failure`), and `git push`. If the failure is",
+      "environment-specific or unclear from the gate, inspect logs with `gh run view --log-failed` (find",
+      "the run via `gh run list --branch <branch>`). Do not disable or weaken checks to make CI pass.",
+    ].join(" "),
+  );
+  return lines.join("\n");
+}
+
+/** Map a statusCheckRollup conclusion/state to gh's coarse bucket. */
+function rollupBucket(stateUpper: string): string {
+  switch (stateUpper) {
+    case "FAILURE":
+    case "ERROR":
+    case "CANCELLED":
+    case "TIMED_OUT":
+    case "ACTION_REQUIRED":
+    case "STARTUP_FAILURE":
+      return "fail";
+    case "SUCCESS":
+      return "pass";
+    case "SKIPPED":
+    case "NEUTRAL":
+      return "skipping";
+    default:
+      return "pending";
+  }
+}
+
+/**
+ * Fetch CI check status for one PR via gh. Reads the head commit sha
+ * (`headRefOid`) and the checks (`gh pr checks --json name,state,bucket,link`),
+ * falling back to `statusCheckRollup` when `gh pr checks --json` is unavailable.
+ * Tolerates nulls/missing fields everywhere; returns `null` when the head sha
+ * can't be resolved so the feature degrades to a no-op. IO; not pure.
+ */
+function fetchCiChecks(prNumber: number, cwd: string): { headSha: string; checks: CiCheck[] } | null {
+  const headJson = runGh(["pr", "view", String(prNumber), "--json", "headRefOid"], cwd) as {
+    headRefOid?: unknown;
+  } | null;
+  const headSha = typeof headJson?.headRefOid === "string" ? headJson.headRefOid : "";
+  if (!headSha) return null;
+
+  const checks: CiCheck[] = [];
+  const raw = runGh(["pr", "checks", String(prNumber), "--json", "name,state,bucket,link"], cwd);
+  if (Array.isArray(raw)) {
+    for (const c of raw) {
+      if (!c || typeof c !== "object") continue;
+      const o = c as Record<string, unknown>;
+      const name = str(o, "name");
+      if (!name) continue;
+      checks.push({
+        name,
+        state: str(o, "state"),
+        bucket: str(o, "bucket"),
+        link: str(o, "link"),
+      });
+    }
+    return { headSha, checks };
+  }
+
+  // Fallback for older gh: map statusCheckRollup conclusions to buckets.
+  const roll = runGh(["pr", "view", String(prNumber), "--json", "statusCheckRollup"], cwd) as {
+    statusCheckRollup?: unknown;
+  } | null;
+  if (roll && Array.isArray(roll.statusCheckRollup)) {
+    for (const c of roll.statusCheckRollup) {
+      if (!c || typeof c !== "object") continue;
+      const o = c as Record<string, unknown>;
+      const name = str(o, "name") || str(o, "context");
+      if (!name) continue;
+      // CheckRun uses `conclusion`; StatusContext uses `state`.
+      const rawState = str(o, "conclusion") || str(o, "state");
+      const stateUpper = rawState.toUpperCase();
+      checks.push({
+        name,
+        state: rawState.toLowerCase(),
+        bucket: rollupBucket(stateUpper),
+        link: str(o, "detailsUrl") || str(o, "targetUrl"),
+      });
+    }
+  }
+  return { headSha, checks };
 }
 
 /**
@@ -1624,13 +1787,14 @@ export default function (pi: ExtensionAPI) {
   let ghPollTimer: ReturnType<typeof setInterval> | undefined;
 
   // Subagent-only (depth 1): timer driving the review-comment loop that polls
-  // THIS PR for new reviewer feedback once it has been pushed.
+  // THIS PR for new reviewer feedback AND its CI status once it has been pushed.
   let reviewPollTimer: ReturnType<typeof setInterval> | undefined;
 
-  // Subagent-only (depth 1): in-memory seen-set of review activity ids (keyed
-  // rc:/rv:/ic:) and the resolved owner/repo. The seen-set is seeded from the
-  // entry's persisted seenReviewIds and kept in sync with it (both the poller and
-  // the reply tool union new ids in), so a restart never reprocesses old comments
+  // Subagent-only (depth 1): in-memory seen-set of surfaced ids — review activity
+  // (keyed rc:/rv:/ic:) and CI failures (keyed ci:<sha>:<name>) — plus the
+  // resolved owner/repo. The seen-set is seeded from the entry's persisted
+  // seenReviewIds and kept in sync with it (the poller, the CI loop, and the
+  // reply tool all union new ids in), so a restart never reprocesses old comments
   // and the bot's own replies are never re-surfaced as new.
   const reviewSeen = new Set<string>();
   let reviewRepo: { owner: string; repo: string } | null = null;
@@ -1787,17 +1951,30 @@ export default function (pi: ExtensionAPI) {
     }
 
     // Depth 1 (a PR subagent): once THIS PR is pushed, poll it for new reviewer
-    // feedback. When new inline comments arrive, inject a fresh task to address +
-    // push + reply (without resolving threads). The timer fires while the
-    // subagent is IDLE (it finished its task and waits in its hidden window), so
-    // injecting via sendUserMessage starts a clean new turn rather than blocking
-    // the current one.
+    // feedback AND CI failures. When new inline comments arrive OR CI checks fail,
+    // inject a fresh task to address + push (review: also reply without resolving
+    // threads; CI: reproduce locally with the gate and fix). The timer fires while
+    // the subagent is IDLE (it finished its task and waits in its hidden window),
+    // so injecting via sendUserMessage starts a clean new turn rather than
+    // blocking the current one.
     //
     // KNOWN LIMITATION: this loop only runs while the subagent process is alive.
-    // If its pane was already killed (e.g. by /cleanup), new review comments are
-    // NOT auto-handled — re-spawning dead agents is out of scope.
+    // If its pane was already killed (e.g. by /cleanup), new review comments and
+    // CI failures are NOT auto-handled — re-spawning dead agents is out of scope.
     if (level === 1 && !reviewPollTimer) {
-      const reviewTick = () => {
+      // Inject a task into a fresh turn: immediately when idle, else queued as a
+      // follow-up so the current turn is never clobbered.
+      const inject = (msg: string) => {
+        if (ctx.isIdle()) pi.sendUserMessage(msg);
+        else pi.sendUserMessage(msg, { deliverAs: "followUp" });
+      };
+
+      // One tick polls BOTH the review-comment loop and the CI-failure loop. They
+      // share the same gate (pushed + numbered + non-terminal), seen-set, and
+      // owner/repo resolution; CI failures are deduped per commit via
+      // ci:<sha>:<name> keys, so a still-failing check after a fix-push re-notifies
+      // (new sha) while a passing run never does.
+      const tick = () => {
         try {
           const myId = process.env.PI_PR_ID;
           if (!myId) return;
@@ -1808,32 +1985,42 @@ export default function (pi: ExtensionAPI) {
           if (entry.pushed !== true || typeof entry.prNumber !== "number") return;
 
           // Seed/refresh the in-memory seen-set from the persisted union so a
-          // restart never reprocesses old comments and the reply tool's writes
-          // are picked up.
+          // restart never reprocesses old comments/failures and the reply tool's
+          // writes are picked up.
           for (const sid of entry.seenReviewIds ?? []) reviewSeen.add(sid);
 
           // Resolve owner/repo once; gh missing/unauth => skip silently.
           if (!reviewRepo) reviewRepo = resolveOwnerRepo(ctx.cwd);
           if (!reviewRepo) return;
 
+          // Review-comment loop: surface (and mark seen) only when there are NEW
+          // actionable comments, so standalone context lingers until it
+          // accompanies real work. Mark seen BEFORE injecting so a slow turn can't
+          // double-surface on the next tick.
           const fetched = fetchReviewActivity(reviewRepo.owner, reviewRepo.repo, entry.prNumber, ctx.cwd);
           const { actionable, contextNotes, newIds } = selectNewReviewItems(fetched, reviewSeen);
-          // Only surface (and mark seen) when there are NEW actionable comments,
-          // so standalone context lingers until it accompanies real work.
-          if (actionable.length === 0) return;
-          // Mark every surfaced id seen BEFORE injecting so a slow turn can't
-          // double-surface them on the next tick.
-          for (const nid of newIds) reviewSeen.add(nid);
-          mergeSeenReviewIds(ctx.cwd, myId, newIds);
-          const msg = buildReviewTask(actionable, contextNotes, entry.prNumber);
-          if (ctx.isIdle()) pi.sendUserMessage(msg);
-          else pi.sendUserMessage(msg, { deliverAs: "followUp" });
+          if (actionable.length > 0) {
+            for (const nid of newIds) reviewSeen.add(nid);
+            mergeSeenReviewIds(ctx.cwd, myId, newIds);
+            inject(buildReviewTask(actionable, contextNotes, entry.prNumber));
+          }
+
+          // CI-failure loop: surface NEW failures for the current head commit.
+          const ci = fetchCiChecks(entry.prNumber, ctx.cwd);
+          if (ci) {
+            const { failures, newKeys } = selectNewCiFailures(ci.checks, ci.headSha, reviewSeen);
+            if (failures.length > 0) {
+              for (const k of newKeys) reviewSeen.add(k);
+              mergeSeenReviewIds(ctx.cwd, myId, newKeys);
+              inject(buildCiFixTask(failures, entry.prNumber));
+            }
+          }
         } catch {
           // Never let a gh/network/notification failure break the poll loop.
         }
       };
-      reviewTick();
-      reviewPollTimer = setInterval(reviewTick, REVIEW_POLL_MS);
+      tick();
+      reviewPollTimer = setInterval(tick, REVIEW_POLL_MS);
     }
   });
 
