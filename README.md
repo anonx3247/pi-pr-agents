@@ -171,9 +171,11 @@ pull request:
 
 ```bash
 npm run typecheck   # tsc --noEmit
-npm run lint        # biome check .  (lint + format check)
-npm run format      # biome format --write .  (apply formatting)
+npm run lint:ci     # biome ci .  (the gate — same script CI and the pre-push hook run)
 npm test            # node:test suite via tsx
+
+npm run lint        # biome check .  (ad-hoc local lint + format check)
+npm run format      # biome format --write .  (apply formatting)
 ```
 
 The pure, deterministic helpers in `extensions/pr-agents.ts` (slug/quote

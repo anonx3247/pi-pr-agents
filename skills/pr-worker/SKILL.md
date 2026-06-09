@@ -86,7 +86,7 @@ your PR for new reviewer feedback. When new inline review comments arrive it
 hands you a fresh task that lists each comment and asks you to:
 
 1. Address each comment with code changes.
-2. Run the gate (`npm run typecheck && npm run lint && npm test`) and commit
+2. Run the gate (`npm run typecheck && npm run lint:ci && npm test`) and commit
    (e.g. `fix: address review feedback`).
 3. Push with `git push`.
 4. **Reply to each inline thread** with the `reply_to_review_comment` tool
@@ -105,7 +105,7 @@ fails on your PR's head commit it hands you a fresh task listing each failing
 check and asks you to:
 
 1. Reproduce the failure locally by running the gate
-   (`npm run typecheck && npm run lint && npm test`).
+   (`npm run typecheck && npm run lint:ci && npm test`).
 2. Fix the cause, commit (e.g. `fix: resolve CI failure`), and `git push`.
 3. If the failure is environment-specific or unclear from the gate, inspect logs
    with `gh run view --log-failed` (find the run via `gh run list --branch <branch>`).

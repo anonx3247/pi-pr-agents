@@ -37,11 +37,12 @@
     "test": "tsx --test tests/*.test.ts",
     "typecheck": "tsc --noEmit",
     "lint": "biome check .",
+    "lint:ci": "biome ci .",
     "format": "biome format --write .",
     "prepare": "simple-git-hooks || true"
   },
   "simple-git-hooks": {
-    "pre-push": "npm run typecheck && npm run lint && npm test"
+    "pre-push": "npm run typecheck && npm run lint:ci && npm test"
   },
   "devDependencies": {
     "@biomejs/biome": "^1.9.4",

@@ -30,7 +30,7 @@ jobs:
         run: npm run typecheck
 
       - name: Lint and format check
-        run: npx biome ci .
+        run: npm run lint:ci
 
       - name: Run tests
         run: npm test
