@@ -58,11 +58,12 @@ git commit -m "<type>: <concise description>"
    submit:
    ```bash
    gt track --parent "$PI_PR_BASE" "$PI_PR_BRANCH"   # if not already tracked
-   gt submit --no-interactive --stack
+   gt submit --no-interactive                         # submit your own branch
    ```
-   (Or, if you are creating the branch through Graphite from scratch, use
-   `gt create -m "<message>"` per commit instead of raw `git commit`.) See the
-   `pr-stacks` skill.
+   Stay on your own branch — the **main agent** owns stack-wide operations
+   (`gt submit --stack`, `gt restack`, `gt sync`, `gt merge`), since `gt` skips
+   branches checked out in other worktrees. See the `pr-stacks` and `gt-graphite`
+   skills.
 
 5. **Signal the PR as pushed** (final step) so your pane and the orchestrator are
    labelled AND the orchestrator starts polling the PR for merge/close:

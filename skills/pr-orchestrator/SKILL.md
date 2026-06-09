@@ -53,7 +53,7 @@ the PR. Remember the answer and pass the same `simplify: true|false` to **every*
    each PR whether it is:
    - **independent** — branches off the base branch, reviewable on its own;
    - **stacked** — depends on a previous PR (see the `pr-stacks` skill for manual
-     stacks vs Graphite).
+     stacks vs Graphite, and the `gt-graphite` skill for the `gt` workflow).
 
 3. **Confirm the plan** with the user (a short ordered list of PR titles).
 
