@@ -123,6 +123,16 @@ function repoRoot(cwd: string): string {
   return git(["rev-parse", "--show-toplevel"], cwd);
 }
 
+/** True when the Graphite CLI (`gt`) is installed and runnable. */
+export function graphiteAvailable(): boolean {
+  try {
+    execFileSync("gt", ["--version"], { stdio: "pipe", timeout: 10000 });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function gitCommonDir(cwd: string): string {
   const d = git(["rev-parse", "--git-common-dir"], cwd);
   return path.resolve(cwd, d);
@@ -168,6 +178,48 @@ function saveState(patch: Partial<UserState>): void {
   const next = { ...loadState(), ...patch };
   try {
     fs.writeFileSync(statePath(), JSON.stringify(next, null, 2));
+  } catch {
+    /* ignore */
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Per-PROJECT config (e.g. the default stacking strategy for this repo)
+//
+// Unlike the per-user state above (~/.pi/pr-agents/state.json), this lives in
+// the repo at <repo-root>/.pi/pr-agents.json so the choice travels with the
+// project. It records ONLY the default strategy used when the orchestrator
+// stacks DEPENDENT PRs: "github" → dispatch_pr mode "stack", "graphite" →
+// mode "graphite". Standalone PRs stay "independent", and an explicit `mode`
+// passed to dispatch_pr always wins. We never touch .gitignore — whether to
+// commit .pi/pr-agents.json is left to the user.
+// ---------------------------------------------------------------------------
+
+export type StackStrategy = "github" | "graphite";
+
+export interface ProjectConfig {
+  strategy?: StackStrategy;
+}
+
+export function projectConfigPath(cwd: string): string {
+  const dir = path.join(repoRoot(cwd), ".pi");
+  fs.mkdirSync(dir, { recursive: true });
+  return path.join(dir, "pr-agents.json");
+}
+
+export function loadProjectConfig(cwd: string): ProjectConfig {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(projectConfigPath(cwd), "utf8"));
+    return parsed && typeof parsed === "object" ? (parsed as ProjectConfig) : {};
+  } catch {
+    return {};
+  }
+}
+
+export function saveProjectConfig(cwd: string, patch: Partial<ProjectConfig>): void {
+  const next = { ...loadProjectConfig(cwd), ...patch };
+  try {
+    fs.writeFileSync(projectConfigPath(cwd), JSON.stringify(next, null, 2));
   } catch {
     /* ignore */
   }
@@ -2059,14 +2111,67 @@ export default function (pi: ExtensionAPI) {
     },
   });
 
+  // Set or show this project's default stacking strategy (github vs graphite).
+  // The strategy only chooses the default `mode` when the orchestrator stacks
+  // DEPENDENT PRs ("github" → "stack", "graphite" → "graphite"); standalone PRs
+  // stay "independent" and an explicit dispatch_pr mode always wins.
+  pi.registerCommand("pr-strategy", {
+    description: "Set/show the project's PR stacking strategy (github | graphite)",
+    handler: async (args, ctx) => {
+      const cwd = ctx.cwd;
+      const arg = (args ?? "").trim().toLowerCase();
+
+      // With an argument: validate, persist, confirm.
+      if (arg) {
+        if (arg !== "github" && arg !== "graphite") {
+          ctx.ui.notify(`Unknown strategy '${arg}'. Use: /pr-strategy github | graphite`, "warning");
+          return;
+        }
+        if (arg === "graphite" && !graphiteAvailable()) {
+          ctx.ui.notify("Graphite CLI (`gt`) not found on PATH. Install it before choosing graphite.", "warning");
+          return;
+        }
+        saveProjectConfig(cwd, { strategy: arg });
+        ctx.ui.notify(`PR stacking strategy set to '${arg}' (${projectConfigPath(cwd)}).`, "info");
+        return;
+      }
+
+      // No argument: show the current value, then prompt to choose.
+      const current = loadProjectConfig(cwd).strategy;
+      const hasGt = graphiteAvailable();
+      const currentLine = current ? `Current PR stacking strategy: ${current}.` : "PR stacking strategy is not set.";
+
+      if (!ctx.hasUI) {
+        const gtNote = hasGt ? "" : " (graphite unavailable: `gt` not on PATH)";
+        ctx.ui.notify(`${currentLine} Choose with: /pr-strategy github | graphite${gtNote}`, "info");
+        return;
+      }
+
+      const options = hasGt ? ["github", "graphite"] : ["github"];
+      const title = hasGt
+        ? `${currentLine} Choose the stacking strategy:`
+        : `${currentLine} (graphite unavailable — gt not on PATH). Choose:`;
+      const choice = await ctx.ui.select(title, options);
+      if (choice !== "github" && choice !== "graphite") return; // cancelled
+      saveProjectConfig(cwd, { strategy: choice });
+      ctx.ui.notify(`PR stacking strategy set to '${choice}' (${projectConfigPath(cwd)}).`, "info");
+    },
+  });
+
   // =====================================================================
   // DEPTH 0 — the main orchestrator
   // =====================================================================
   if (level === 0) {
     // Always-on orchestrator guidance: triage + how to use companion tools.
-    pi.on("before_agent_start", async (event) => {
+    pi.on("before_agent_start", async (event, ctx) => {
+      const strategy = loadProjectConfig(ctx.cwd).strategy;
+      const strategyLine = strategy
+        ? `PR stacking strategy: ${strategy} (from .pi/pr-agents.json). Standalone PRs stay independent; an explicit dispatch_pr mode always wins.`
+        : "PR stacking strategy: not set — run /pr-strategy to choose github vs graphite (defaults to github for stacking). Standalone PRs stay independent.";
       const header = [
         "# You are the PR-orchestrator (main agent)",
+        "",
+        strategyLine,
         "",
         "You never edit code yourself (edit/write are disabled). You split work into",
         "small pull requests and dispatch one dedicated worktree subagent per PR with",

@@ -27,7 +27,10 @@ worktree, laid out as a labelled **tmux pane** beside the main agent.
 - **Atomic commits, always.** PR subagents are instructed to commit after every
   coherent change, keeping git history crystal clear.
 - **PR stacks & Graphite.** Tell the main agent to stack PRs and it dispatches
-  with `mode: "stack"` (manual GitHub stacks) or `mode: "graphite"` (`gt`).
+  with `mode: "stack"` (manual GitHub stacks) or `mode: "graphite"` (`gt`). Record
+  a per-project default with **`/pr-strategy`** (github vs graphite); it only
+  picks the default mode for *stacking* dependent PRs — standalone PRs stay
+  `independent` and an explicit `dispatch_pr` mode always wins.
 - **Two levels deep, max.** A PR subagent may spawn helper subagents
   (`dispatch_helper`) for focused sub-tasks in its worktree, but helpers cannot
   spawn anything further.
@@ -121,7 +124,8 @@ dispatches a subagent per PR.
 | PR (1) | `list_helpers` / `peek_helper` / `send_to_helper` / `stop_helper` | Monitor & control helpers |
 | helper (2) | — | none (cannot dispatch further) |
 
-Commands: `/cleanup` (`/cleanup dry` to preview), `/pr-agents`.
+Commands: `/cleanup` (`/cleanup dry` to preview), `/pr-agents`, `/pr-strategy`
+(`/pr-strategy github|graphite` to set, or no argument to show + choose).
 
 ## Skills
 
@@ -144,6 +148,15 @@ the main repo and every worktree, so each agent sees the same set of PRs.
 
 ## Configuration
 
+- **Stacking strategy** — the default used when the orchestrator stacks
+  *dependent* PRs is stored per project in `<repo-root>/.pi/pr-agents.json` (e.g.
+  `{"strategy":"graphite"}`). Set or view it with `/pr-strategy github|graphite`
+  (or `/pr-strategy` alone to show the current value and choose; `graphite` is
+  only offered when the `gt` CLI is installed). `github` maps to
+  `dispatch_pr({mode:"stack"})` and `graphite` to `mode:"graphite"`; standalone
+  PRs stay `independent` and an explicit `mode` on `dispatch_pr` always overrides
+  the stored strategy. The file is not git-ignored by the package — committing it
+  (to share the choice) or not is left to you.
 - `PI_PR_ALLOW_MAIN_EDITS=1` — let the main agent keep `edit`/`write` (off by
   default; the orchestrator is meant to delegate, not edit).
 - `PI_PR_NO_ALIAS_PROMPT=1` — don't offer to install the tmux `pr-pi` wrapper.
