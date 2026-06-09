@@ -8,12 +8,16 @@ import { afterEach, beforeEach, describe, test } from "node:test";
 import {
   type PrEntry,
   aliasBlock,
+  buildFinishedNotification,
+  capTail,
   detectShell,
+  extractFinalResult,
   findEntry,
   isWorkingSnapshot,
   loadRegistry,
   paneTitle,
   saveRegistry,
+  selectNewlyFinished,
   shq,
   slugify,
   statusMarker,
@@ -238,6 +242,150 @@ describe("detectShell", () => {
     assert.equal(detectShell(), "unknown");
     delete process.env.SHELL;
     assert.equal(detectShell(), "unknown");
+  });
+});
+
+describe("capTail", () => {
+  test("returns the string unchanged when within the cap", () => {
+    assert.equal(capTail("hello", 10), "hello");
+    assert.equal(capTail("exactly10!", 10), "exactly10!");
+  });
+
+  test("keeps the tail and marks the cut, staying within the cap", () => {
+    const out = capTail("abcdefghij", 5);
+    assert.equal(out.length, 5);
+    assert.ok(out.startsWith("\u2026"));
+    assert.ok(out.endsWith("j"));
+  });
+});
+
+describe("extractFinalResult", () => {
+  test("concatenates text parts of the last assistant message", () => {
+    const messages = [
+      { role: "user", content: "do the thing" },
+      { role: "assistant", content: [{ type: "text", text: "first" }] },
+      { role: "toolResult", content: [{ type: "text", text: "tool output" }] },
+      {
+        role: "assistant",
+        content: [
+          { type: "thinking", thinking: "hmm" },
+          { type: "text", text: "Done. " },
+          { type: "toolCall", id: "x", name: "y", arguments: {} },
+          { type: "text", text: "Opened PR #42." },
+        ],
+      },
+    ];
+    assert.equal(extractFinalResult(messages), "Done. Opened PR #42.");
+  });
+
+  test("supports a plain string assistant content", () => {
+    assert.equal(extractFinalResult([{ role: "assistant", content: "  summary  " }]), "summary");
+  });
+
+  test("returns empty string when there is no assistant text", () => {
+    assert.equal(extractFinalResult([]), "");
+    assert.equal(extractFinalResult([{ role: "user", content: "hi" }]), "");
+    assert.equal(extractFinalResult([{ role: "assistant", content: [{ type: "text", text: "   " }] }]), "");
+    assert.equal(
+      extractFinalResult([{ role: "assistant", content: [{ type: "toolCall", id: "a", name: "b", arguments: {} }] }]),
+      "",
+    );
+  });
+
+  test("caps to the tail keeping the final summary", () => {
+    const long = `${"x".repeat(50)} FINAL`;
+    const out = extractFinalResult([{ role: "assistant", content: [{ type: "text", text: long }] }], 10);
+    assert.equal(out.length, 10);
+    assert.ok(out.endsWith("FINAL"));
+  });
+});
+
+describe("selectNewlyFinished", () => {
+  function entry(id: string, depth: number, resultSeq?: number): PrEntry {
+    return {
+      id,
+      prName: `pr ${id}`,
+      branch: `pi/${id}`,
+      base: "main",
+      mode: "stack",
+      paneId: "%1",
+      worktree: "/tmp",
+      depth,
+      parentId: "",
+      status: "working",
+      createdAt: "2026-01-01T00:00:00.000Z",
+      ...(resultSeq !== undefined ? { resultSeq } : {}),
+    };
+  }
+
+  test("returns entries whose resultSeq exceeds the last-seen value", () => {
+    const entries = [entry("a", 1, 0), entry("b", 1, 2)];
+    const fresh = selectNewlyFinished(entries, new Map([["b", 1]]));
+    assert.deepEqual(
+      fresh.map((f) => [f.entry.id, f.seq]),
+      [
+        ["a", 0],
+        ["b", 2],
+      ],
+    );
+  });
+
+  test("skips entries already seen at the same seq (dedup)", () => {
+    const entries = [entry("a", 1, 3)];
+    assert.deepEqual(selectNewlyFinished(entries, new Map([["a", 3]])), []);
+  });
+
+  test("ignores non-depth-1 entries and entries without a resultSeq", () => {
+    const entries = [entry("helper", 2, 5), entry("noseq", 1, undefined)];
+    assert.deepEqual(selectNewlyFinished(entries, new Map()), []);
+  });
+});
+
+describe("buildFinishedNotification", () => {
+  function finished(id: string, patch: Partial<PrEntry>): PrEntry {
+    return {
+      id,
+      prName: `pr ${id}`,
+      branch: `pi/${id}`,
+      base: "main",
+      mode: "stack",
+      paneId: "%1",
+      worktree: "/tmp",
+      depth: 1,
+      parentId: "",
+      status: "working",
+      createdAt: "2026-01-01T00:00:00.000Z",
+      ...patch,
+    };
+  }
+
+  test("single agent: includes id, PR number, name, branch, and result", () => {
+    const msg = buildFinishedNotification([
+      finished("aaa", { prNumber: 42, prName: "add limiter", branch: "pi/limiter", lastResult: "all green" }),
+    ]);
+    assert.ok(msg.startsWith("A PR subagent stopped working:"));
+    assert.ok(msg.includes("id aaa"));
+    assert.ok(msg.includes("PR #42"));
+    assert.ok(msg.includes("add limiter"));
+    assert.ok(msg.includes("pi/limiter"));
+    assert.ok(msg.includes("all green"));
+    assert.ok(msg.includes("Do not take destructive actions without cause."));
+  });
+
+  test("shows 'pending' when no PR number and a placeholder for a missing result", () => {
+    const msg = buildFinishedNotification([finished("bbb", {})]);
+    assert.ok(msg.includes("PR pending"));
+    assert.ok(msg.includes("(no result captured)"));
+  });
+
+  test("combines multiple agents into one message", () => {
+    const msg = buildFinishedNotification([
+      finished("aaa", { lastResult: "one" }),
+      finished("bbb", { lastResult: "two" }),
+    ]);
+    assert.ok(msg.startsWith("2 PR subagents stopped working:"));
+    assert.ok(msg.includes("id aaa"));
+    assert.ok(msg.includes("id bbb"));
   });
 });
 
