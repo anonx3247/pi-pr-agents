@@ -19,6 +19,7 @@ import {
   isWorkingSnapshot,
   loadRegistry,
   paneTitle,
+  pickRedockAgent,
   saveRegistry,
   selectNewlyFinished,
   selectStateTransitions,
@@ -133,6 +134,54 @@ describe("statusMarker", () => {
   test("live panes reflect the working spinner", () => {
     assert.deepEqual(statusMarker("working", true, true), { icon: "●", color: "success", label: "working" });
     assert.deepEqual(statusMarker("open", true, false), { icon: "○", color: "warning", label: "idle" });
+  });
+});
+
+describe("pickRedockAgent", () => {
+  const mk = (id: string, paneId: string, createdAt: string, d = 1): PrEntry =>
+    ({
+      id,
+      prName: id,
+      branch: id,
+      base: "main",
+      mode: "independent",
+      paneId,
+      worktree: `/wt/${id}`,
+      depth: d,
+      parentId: "root",
+      status: "working",
+      createdAt,
+    }) as PrEntry;
+
+  test("returns the most recently created live depth-1 agent", () => {
+    const entries = [
+      mk("a", "%1", "2026-01-01T00:00:00Z"),
+      mk("b", "%2", "2026-03-01T00:00:00Z"),
+      mk("c", "%3", "2026-02-01T00:00:00Z"),
+    ];
+    assert.equal(pickRedockAgent(entries, () => true)?.id, "b");
+  });
+
+  test("skips dead panes and non-depth-1 entries", () => {
+    const entries = [
+      mk("a", "%1", "2026-01-01T00:00:00Z"),
+      mk("helper", "%2", "2026-09-01T00:00:00Z", 2),
+      mk("b", "%3", "2026-02-01T00:00:00Z"),
+    ];
+    const alive = (p: string) => p !== "%1";
+    assert.equal(pickRedockAgent(entries, alive)?.id, "b");
+  });
+
+  test("returns undefined when there are no live agents", () => {
+    const entries = [mk("a", "%1", "2026-01-01T00:00:00Z")];
+    assert.equal(
+      pickRedockAgent(entries, () => false),
+      undefined,
+    );
+    assert.equal(
+      pickRedockAgent([], () => true),
+      undefined,
+    );
   });
 });
 

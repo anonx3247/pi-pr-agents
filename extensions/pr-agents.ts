@@ -1005,6 +1005,80 @@ function sendToPane(paneId: string, message: string): boolean {
 }
 
 // ---------------------------------------------------------------------------
+// Dock-right + auto-flip (orchestrator only, inside tmux)
+//
+// A single PR-agent pane is docked to the RIGHT of the orchestrator's own pane
+// (the orchestrator stays dominant on the left via main-vertical). On dispatch
+// we auto-flip to the newest agent. Everything is guarded so the orchestrator's
+// own pane is NEVER broken or killed.
+// ---------------------------------------------------------------------------
+
+// The orchestrator's OWN pane id, captured at depth-0 session_start. Every
+// dock/undock targets this pane and must never break/kill it.
+let orchestratorPane: string | undefined;
+// The PR-agent pane currently joined into the orchestrator window (docked on
+// the right), or undefined when the orchestrator pane is alone (collapsed).
+let dockedPaneId: string | undefined;
+
+/**
+ * Choose which agent to (re)dock: the most-recently-created LIVE depth-1 PR
+ * agent. Pure (liveness via the injected predicate) so it can be unit-tested.
+ * Returns the chosen entry, or undefined when there are no live agents.
+ */
+export function pickRedockAgent(
+  entries: readonly PrEntry[],
+  isAlive: (paneId: string) => boolean,
+): PrEntry | undefined {
+  const live = entries.filter((e) => e.depth === 1 && e.paneId && isAlive(e.paneId));
+  if (live.length === 0) return undefined;
+  return live.reduce((best, e) => (e.createdAt > best.createdAt ? e : best));
+}
+
+/** True when a pane id is safe to dock/undock (known, non-empty, not the orchestrator). */
+function dockable(paneId: string | undefined): paneId is string {
+  return insideTmux() && Boolean(orchestratorPane) && Boolean(paneId) && paneId !== orchestratorPane;
+}
+
+/**
+ * Send the currently-docked agent's pane back to its own hidden background
+ * window (break-pane -d). Guarded so the orchestrator pane is never broken.
+ */
+function undockCurrent(cwd: string): void {
+  const pane = dockedPaneId;
+  if (!dockable(pane)) {
+    dockedPaneId = undefined;
+    return;
+  }
+  if (paneAlive(pane)) {
+    const entry = loadRegistry(cwd).find((e) => e.paneId === pane);
+    const name = entry ? windowName(entry) : "pr";
+    tryTmux(["break-pane", "-d", "-s", pane, "-n", name]);
+  }
+  dockedPaneId = undefined;
+}
+
+/**
+ * Dock `paneId` to the RIGHT of the orchestrator pane: undock the current one,
+ * then join the new agent's pane into the orchestrator window and re-tile so the
+ * orchestrator stays dominant on the left (main-vertical, 60% main width). If
+ * join-pane fails the agent stays in its hidden window (no harm) and
+ * dockedPaneId is unchanged. Guarded so the orchestrator pane is never targeted.
+ */
+function dockAgent(cwd: string, paneId: string): void {
+  if (!dockable(paneId) || paneId === dockedPaneId) return;
+  const target = orchestratorPane;
+  if (!target) return;
+  undockCurrent(cwd);
+  // join-pane returns "" on success; tryTmux yields null only on failure.
+  if (tryTmux(["join-pane", "-h", "-s", paneId, "-t", target]) === null) return;
+  tryTmux(["select-layout", "-t", target, "main-vertical"]);
+  tryTmux(["set-window-option", "-t", target, "main-pane-width", "60%"]);
+  dockedPaneId = paneId;
+  const entry = loadRegistry(cwd).find((e) => e.paneId === paneId);
+  if (entry) setPaneTitle(paneId, paneTitle(entry));
+}
+
+// ---------------------------------------------------------------------------
 // Launch commands
 // ---------------------------------------------------------------------------
 
@@ -1523,6 +1597,12 @@ export default function (pi: ExtensionAPI) {
   pi.on("session_start", async (_event, ctx) => {
     if (insideTmux()) tmuxSetup();
 
+    // Depth 0 inside tmux: capture the orchestrator's OWN pane id once. Every
+    // dock/undock targets this pane and must never break/kill it.
+    if (level === 0 && insideTmux() && !orchestratorPane) {
+      orchestratorPane = process.env.TMUX_PANE || tryTmux(["display-message", "-p", "#{pane_id}"]) || undefined;
+    }
+
     // The main agent never writes code directly: disable edit/write at depth 0
     // unless explicitly opted out. It orchestrates; subagents do the writing.
     if (level === 0 && !process.env.PI_PR_ALLOW_MAIN_EDITS) {
@@ -1569,6 +1649,17 @@ export default function (pi: ExtensionAPI) {
         } catch {
           // tmux/git failures already degrade to null inside renderPrWidget;
           // never let the refresh loop throw.
+        }
+        // Maintenance: if the docked agent ended (pane gone), re-dock the most
+        // recently created live agent, or collapse to the orchestrator alone.
+        try {
+          if (insideTmux() && orchestratorPane && dockedPaneId && !paneAlive(dockedPaneId)) {
+            const next = pickRedockAgent(loadRegistry(ctx.cwd), paneAlive);
+            if (next) dockAgent(ctx.cwd, next.paneId);
+            else dockedPaneId = undefined;
+          }
+        } catch {
+          // Never let dock maintenance break the refresh loop.
         }
         // Reuse this refresh tick to auto-notify the orchestrator whenever a PR
         // subagent finishes a turn. The seq + last-seen map dedups; isIdle
@@ -1694,6 +1785,15 @@ export default function (pi: ExtensionAPI) {
     if (reviewPollTimer) {
       clearInterval(reviewPollTimer);
       reviewPollTimer = undefined;
+    }
+    // Return any docked agent to its own hidden window so a clean exit doesn't
+    // leave a stray pane in the (closing) orchestrator window. Guarded.
+    if (level === 0 && insideTmux()) {
+      try {
+        undockCurrent(ctx.cwd);
+      } catch {
+        // Never let dock teardown break shutdown.
+      }
     }
     if (level === 0 && ctx.hasUI) ctx.ui.setWidget(WIDGET_KEY, undefined);
   });
@@ -1872,6 +1972,10 @@ export default function (pi: ExtensionAPI) {
         }
         entry.paneId = paneId;
         saveRegistry(cwd, [...entries, entry]);
+
+        // Auto-flip: dock the newest PR agent to the right of the orchestrator
+        // (the previously-docked agent is returned to its hidden window).
+        dockAgent(cwd, paneId);
 
         return {
           content: [
