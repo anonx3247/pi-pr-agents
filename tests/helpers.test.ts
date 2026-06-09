@@ -8,6 +8,7 @@ import { afterEach, beforeEach, describe, test } from "node:test";
 import {
   type PrEntry,
   aliasBlock,
+  buildAgentPickerItems,
   buildCleanupNotification,
   buildFinishedNotification,
   capTail,
@@ -238,6 +239,69 @@ describe("pickRedockAgent", () => {
       pickRedockAgent([], () => true),
       undefined,
     );
+  });
+});
+
+describe("buildAgentPickerItems", () => {
+  const mk = (id: string, paneId: string, over: Partial<PrEntry> = {}): PrEntry =>
+    ({
+      id,
+      prName: `pr-${id}`,
+      branch: `branch-${id}`,
+      base: "main",
+      mode: "independent",
+      paneId,
+      worktree: `/wt/${id}`,
+      depth: 1,
+      parentId: "root",
+      status: "working",
+      createdAt: "2026-01-01T00:00:00Z",
+      ...over,
+    }) as PrEntry;
+
+  test("filters to live depth-1 agents only", () => {
+    const entries = [mk("a", "%1"), mk("helper", "%2", { depth: 2 }), mk("dead", "%3"), mk("nopane", "")];
+    const items = buildAgentPickerItems(entries, {
+      isAlive: (p) => p === "%1",
+      isWorking: () => false,
+    });
+    assert.deepEqual(
+      items.map((i) => i.id),
+      ["a"],
+    );
+    assert.equal(items[0].value, "%1");
+  });
+
+  test("marks the docked agent with a (docked) suffix", () => {
+    const entries = [mk("a", "%1"), mk("b", "%2")];
+    const items = buildAgentPickerItems(entries, {
+      isAlive: () => true,
+      isWorking: () => false,
+      dockedPaneId: "%2",
+    });
+    const a = items.find((i) => i.id === "a");
+    const b = items.find((i) => i.id === "b");
+    assert.equal(a?.docked, false);
+    assert.equal(b?.docked, true);
+    assert.ok(b?.label.endsWith("(docked)"));
+    assert.ok(!a?.label.includes("(docked)"));
+  });
+
+  test("formats the label via statusMarker and exposes branch as description", () => {
+    const entries = [mk("a", "%1", { prNumber: 12, status: "open" })];
+    const working = buildAgentPickerItems(entries, { isAlive: () => true, isWorking: () => true });
+    assert.equal(working[0].marker.label, "working");
+    assert.equal(working[0].label, "● working a  PR #12  pr-a");
+    assert.equal(working[0].description, "branch-a");
+
+    const waiting = buildAgentPickerItems(entries, { isAlive: () => true, isWorking: () => false });
+    assert.equal(waiting[0].marker.label, "waiting");
+    assert.equal(waiting[0].label, "○ waiting a  PR #12  pr-a");
+  });
+
+  test("shows 'pending' when no PR number is recorded yet", () => {
+    const items = buildAgentPickerItems([mk("a", "%1")], { isAlive: () => true, isWorking: () => false });
+    assert.ok(items[0].label.includes("pending"));
   });
 });
 
