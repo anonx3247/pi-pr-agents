@@ -10,12 +10,15 @@ import {
   aliasBlock,
   detectShell,
   findEntry,
+  isWorkingSnapshot,
   loadRegistry,
   paneTitle,
   saveRegistry,
   shq,
   slugify,
+  statusMarker,
   updateEntry,
+  windowName,
 } from "../extensions/pr-agents.ts";
 
 describe("slugify", () => {
@@ -65,6 +68,62 @@ describe("paneTitle", () => {
       paneTitle({ prNumber: undefined, prName: "add tests", branch: "pi/tests" }),
       "PR add tests (pi/tests)",
     );
+  });
+});
+
+describe("windowName", () => {
+  test("uses prN tag with a slugified name when a PR number is set", () => {
+    assert.equal(windowName({ prNumber: 12, prName: "Add Rate Limiter", branch: "pi/rate" }), "pr12-add-rate-limiter");
+  });
+
+  test("falls back to a 'pr' tag and the branch when no name/number", () => {
+    assert.equal(windowName({ prNumber: undefined, prName: "", branch: "pi/feature" }), "pr-pi-feature");
+  });
+
+  test("caps length and trims trailing dashes", () => {
+    const name = windowName({ prNumber: undefined, prName: "x".repeat(80), branch: "b" });
+    assert.ok(name.length <= 24);
+    assert.ok(!name.endsWith("-"));
+  });
+});
+
+describe("isWorkingSnapshot", () => {
+  test("returns false for null or empty snapshots", () => {
+    assert.equal(isWorkingSnapshot(null), false);
+    assert.equal(isWorkingSnapshot(""), false);
+    assert.equal(isWorkingSnapshot("just some idle output\n> "), false);
+  });
+
+  test("detects braille spinner glyphs in the recent tail", () => {
+    assert.equal(isWorkingSnapshot("line\n⠹ thinking"), true);
+  });
+
+  test("detects the Working / Esc to interrupt activity line", () => {
+    assert.equal(isWorkingSnapshot("Working (12s · Esc to interrupt)"), true);
+    assert.equal(isWorkingSnapshot("foo\nbar\nesc to interrupt"), true);
+  });
+
+  test("ignores activity that scrolled out of the recent tail", () => {
+    const old = `Working\n${Array.from({ length: 10 }, (_, i) => `line ${i}`).join("\n")}`;
+    assert.equal(isWorkingSnapshot(old), false);
+  });
+});
+
+describe("statusMarker", () => {
+  test("terminal registry states win over liveness", () => {
+    assert.deepEqual(statusMarker("merged", true, true), { icon: "✓", color: "success", label: "merged" });
+    assert.deepEqual(statusMarker("closed", true, false), { icon: "✗", color: "error", label: "closed" });
+  });
+
+  test("dead panes are stopped/ended", () => {
+    assert.equal(statusMarker("stopped", false, false).label, "stopped");
+    assert.equal(statusMarker("open", false, false).label, "ended");
+    assert.equal(statusMarker("working", false, false).icon, "■");
+  });
+
+  test("live panes reflect the working spinner", () => {
+    assert.deepEqual(statusMarker("working", true, true), { icon: "●", color: "success", label: "working" });
+    assert.deepEqual(statusMarker("open", true, false), { icon: "○", color: "warning", label: "idle" });
   });
 });
 

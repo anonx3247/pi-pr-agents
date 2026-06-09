@@ -24,6 +24,7 @@ import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { StringEnum } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ToolDefinition } from "@earendil-works/pi-coding-agent";
+import { truncateToWidth } from "@earendil-works/pi-tui";
 import { type TSchema, Type } from "typebox";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -333,6 +334,15 @@ export function paneTitle(entry: Pick<PrEntry, "prNumber" | "prName" | "branch">
   return `${tag} ${entry.prName} (${entry.branch})`;
 }
 
+/**
+ * Concise tmux window name (for `tmux list-windows`) derived from the PR
+ * number / name / branch. Slugified and capped so the window list stays tidy.
+ */
+export function windowName(entry: Pick<PrEntry, "prNumber" | "prName" | "branch">): string {
+  const tag = entry.prNumber !== undefined ? `pr${entry.prNumber}` : "pr";
+  return `${tag}-${slugify(entry.prName || entry.branch)}`.slice(0, 24).replace(/-+$/g, "") || "pr";
+}
+
 function paneAlive(paneId: string): boolean {
   const out = tryTmux(["list-panes", "-a", "-F", "#{pane_id}"]);
   if (!out) return false;
@@ -342,6 +352,7 @@ function paneAlive(paneId: string): boolean {
 /**
  * Open a new pane running `command` (a shell string) in `cwd`, label it, and
  * re-tile so the dispatching agent stays large on the left (main-vertical).
+ * Used for helper subagents, which live alongside their parent PR agent.
  */
 function openPane(cwd: string, command: string, title: string): string {
   const paneId = tmux(["split-window", "-h", "-d", "-P", "-F", "#{pane_id}", "-c", cwd, command]);
@@ -349,6 +360,19 @@ function openPane(cwd: string, command: string, title: string): string {
   // Keep the orchestrator pane dominant on the left, PR panes stacked right.
   tryTmux(["set-window-option", "-t", paneId, "main-pane-width", "55%"]);
   tryTmux(["select-layout", "-t", paneId, "main-vertical"]);
+  return paneId;
+}
+
+/**
+ * Launch `command` in its OWN tmux window, created in the background (`-d` keeps
+ * focus on the orchestrator). Returns the new pane id (registry's paneId), which
+ * still works with `-t %paneId` across windows. Used for PR subagents so the
+ * orchestrator stays full-screen; the agent is reachable via the list widget and
+ * focus_pr_agent (which select-window + select-pane brings full-screen).
+ */
+function openWindow(cwd: string, command: string, title: string, name: string): string {
+  const paneId = tmux(["new-window", "-d", "-P", "-F", "#{pane_id}", "-c", cwd, "-n", name, command]);
+  tryTmux(["select-pane", "-t", paneId, "-T", title]);
   return paneId;
 }
 
@@ -737,11 +761,94 @@ function registerPaneControlTools(pi: ExtensionAPI, cfg: PaneControlConfig): voi
 }
 
 // ---------------------------------------------------------------------------
+// PR-agents list widget (orchestrator only)
+// ---------------------------------------------------------------------------
+
+const WIDGET_KEY = "pr-agents";
+// Braille spinner glyphs pi cycles through while it is "Working".
+const SPINNER_GLYPHS = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏";
+
+/**
+ * True when a pane's recent output shows pi actively working: the braille
+ * spinner, or an activity line ("Working" / "Esc to interrupt"). Pure so it can
+ * be unit-tested without tmux.
+ */
+export function isWorkingSnapshot(snapshot: string | null): boolean {
+  if (!snapshot) return false;
+  const tail = snapshot.split("\n").slice(-6).join("\n");
+  if ([...SPINNER_GLYPHS].some((g) => tail.includes(g))) return true;
+  return /esc to interrupt/i.test(tail) || /\bWorking\b/.test(tail);
+}
+
+type MarkerColor = "success" | "warning" | "dim" | "error";
+interface StatusMarker {
+  icon: string;
+  color: MarkerColor;
+  label: string;
+}
+
+/**
+ * Derive the status marker (icon + theme color + label) for one PR agent from
+ * its registry status plus live pane state. Terminal registry states
+ * (merged/closed) win; otherwise liveness and the working spinner decide.
+ * Pure so it can be unit-tested.
+ */
+export function statusMarker(status: PrEntry["status"], alive: boolean, working: boolean): StatusMarker {
+  if (status === "merged") return { icon: "✓", color: "success", label: "merged" };
+  if (status === "closed") return { icon: "✗", color: "error", label: "closed" };
+  if (!alive) return { icon: "■", color: "dim", label: status === "stopped" ? "stopped" : "ended" };
+  if (working) return { icon: "●", color: "success", label: "working" };
+  return { icon: "○", color: "warning", label: "idle" };
+}
+
+/**
+ * Latest commit title in a PR worktree, or "(no commits yet)" when the branch
+ * has no commits beyond its base. Falls back safely if git fails.
+ */
+function latestCommitTitle(worktree: string, base: string): string {
+  const count = tryGit(["rev-list", "--count", `${base}..HEAD`], worktree);
+  if (count !== null && count.trim() === "0") return "(no commits yet)";
+  const title = tryGit(["log", "-1", "--format=%s"], worktree);
+  return title && title.length > 0 ? title : "(no commits yet)";
+}
+
+interface WidgetTheme {
+  fg(color: string, text: string): string;
+}
+
+/**
+ * Build the widget's lines for the current registry. Returns `undefined` when
+ * there are no PR agents (so the caller clears the widget). Reads live pane and
+ * git state; everything degrades gracefully if tmux/git calls fail.
+ */
+function renderPrWidget(cwd: string, theme: WidgetTheme, width: number): string[] | undefined {
+  const entries = loadRegistry(cwd).filter((e) => e.depth === 1);
+  if (entries.length === 0) return undefined;
+
+  const cap = Math.max(20, width - 1);
+  const lines: string[] = [theme.fg("accent", `● PR agents (${entries.length})`)];
+  for (const e of entries) {
+    const alive = paneAlive(e.paneId);
+    const working = alive && isWorkingSnapshot(capturePane(e.paneId, 8));
+    const m = statusMarker(e.status, alive, working);
+    const pr = e.prNumber !== undefined ? `PR #${e.prNumber} ${e.status}` : "pending";
+    const head = `${theme.fg(m.color, m.icon)} ${theme.fg(m.color, m.label.padEnd(7))} ${e.id}  ${pr}  ${e.prName}`;
+    lines.push(truncateToWidth(head, cap));
+    const sub = `    ${e.branch} · ${latestCommitTitle(e.worktree, e.base)}`;
+    lines.push(truncateToWidth(theme.fg("dim", sub), cap, ""));
+  }
+  return lines;
+}
+
+// ---------------------------------------------------------------------------
 // Extension entry point
 // ---------------------------------------------------------------------------
 
 export default function (pi: ExtensionAPI) {
   const level = depth();
+
+  // Timer driving the orchestrator's live PR-agents list widget (depth 0 only).
+  let widgetTimer: ReturnType<typeof setInterval> | undefined;
 
   // Dispatched PR/helper subagents run in a worktree of a repo the user already
   // chose to work in, so auto-trust it instead of blocking on the trust prompt.
@@ -787,6 +894,32 @@ export default function (pi: ExtensionAPI) {
         saveState({ aliasPrompted: true });
       }
     }
+
+    // Depth 0 with a UI: render a persistent, auto-refreshing list of the
+    // dispatched PR agents above the editor (status marker + latest commit).
+    if (level === 0 && ctx.hasUI && !widgetTimer) {
+      const tick = () => {
+        try {
+          const width = process.stdout.columns ?? 100;
+          const lines = renderPrWidget(ctx.cwd, ctx.ui.theme, width);
+          ctx.ui.setWidget(WIDGET_KEY, lines);
+        } catch {
+          // tmux/git failures already degrade to null inside renderPrWidget;
+          // never let the refresh loop throw.
+        }
+      };
+      tick();
+      widgetTimer = setInterval(tick, 2000);
+    }
+  });
+
+  // Tear down the refresh timer and clear the widget on shutdown.
+  pi.on("session_shutdown", async (_event, ctx) => {
+    if (widgetTimer) {
+      clearInterval(widgetTimer);
+      widgetTimer = undefined;
+    }
+    if (level === 0 && ctx.hasUI) ctx.ui.setWidget(WIDGET_KEY, undefined);
   });
 
   // Manual (re)install command, available everywhere.
@@ -947,12 +1080,12 @@ export default function (pi: ExtensionAPI) {
         const command = buildWorkerCommand(entry, taskMsg);
         let paneId: string;
         try {
-          paneId = openPane(worktree, command, paneTitle(entry));
+          paneId = openWindow(worktree, command, paneTitle(entry), windowName(entry));
         } catch (err) {
           tryGit(["worktree", "remove", "--force", worktree], root);
           tryGit(["branch", "-D", branch], root);
           return {
-            content: [{ type: "text", text: `Failed to open tmux pane: ${(err as Error).message}` }],
+            content: [{ type: "text", text: `Failed to open tmux window: ${(err as Error).message}` }],
             isError: true,
           };
         }
@@ -964,7 +1097,7 @@ export default function (pi: ExtensionAPI) {
             {
               type: "text",
               text: [
-                `Dispatched PR subagent.`,
+                `Dispatched PR subagent in a background tmux window (orchestrator stays full-screen).`,
                 `  id:       ${id}`,
                 `  pr_name:  ${params.pr_name}`,
                 `  branch:   ${branch}`,
@@ -973,7 +1106,8 @@ export default function (pi: ExtensionAPI) {
                 `  worktree: ${worktree}`,
                 `  pane:     ${paneId}`,
                 ``,
-                `Use focus_pr_agent({id:"${id}"}) to jump to it, send_to_pr_agent to steer it, list_pr_agents to track status.`,
+                `It shows up live in the "● PR agents" list widget. Use focus_pr_agent({id:"${id}"}) to bring it`,
+                `full-screen, send_to_pr_agent to steer it, list_pr_agents to track status.`,
               ].join("\n"),
             },
           ],
