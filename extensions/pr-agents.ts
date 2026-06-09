@@ -647,11 +647,10 @@ function registerPaneControlTools(pi: ExtensionAPI, cfg: PaneControlConfig): voi
       if (entries.length === 0) {
         return { content: [{ type: "text", text: cfg.list.empty }] };
       }
-      const result: ToolTextResult = {
+      return {
         content: [{ type: "text", text: entries.map(cfg.list.row).join("\n") }],
+        ...(cfg.list.details ? { details: cfg.list.details(entries) } : {}),
       };
-      if (cfg.list.details) result.details = cfg.list.details(entries);
-      return result;
     },
   });
 
@@ -670,11 +669,10 @@ function registerPaneControlTools(pi: ExtensionAPI, cfg: PaneControlConfig): voi
         if (snap === null) {
           return { content: [{ type: "text", text: cfg.peek.paneDead(entry.paneId) }], isError: true };
         }
-        const result: ToolTextResult = {
+        return {
           content: [{ type: "text", text: `${cfg.peek.header(entry)}\n${snap}` }],
+          ...(cfg.peek.details ? { details: cfg.peek.details(entry) } : {}),
         };
-        if (cfg.peek.details) result.details = cfg.peek.details(entry);
-        return result;
       });
     },
   });
