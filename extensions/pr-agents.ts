@@ -1473,14 +1473,21 @@ const GH_POLL_MS = 30000;
 // Braille spinner glyphs pi cycles through while it is "Working".
 const SPINNER_GLYPHS = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏";
 
+// How many trailing lines of a pane snapshot to scan for the working spinner.
+// pi renders its `⠋ Working… / Esc to interrupt` line ABOVE the input box
+// (~8-10 lines from the bottom), so a small tail (e.g. 6) misses it and the
+// agent wrongly shows idle. Scan a much wider tail to catch it reliably.
+const WORKING_SCAN_LINES = 25;
+
 /**
  * True when a pane's recent output shows pi actively working: the braille
- * spinner, or an activity line ("Working" / "Esc to interrupt"). Pure so it can
- * be unit-tested without tmux.
+ * spinner, or an activity line ("Working" / "Esc to interrupt"). Scans the last
+ * {@link WORKING_SCAN_LINES} lines so the activity line (which sits above the
+ * input box) is detected. Pure so it can be unit-tested without tmux.
  */
 export function isWorkingSnapshot(snapshot: string | null): boolean {
   if (!snapshot) return false;
-  const tail = snapshot.split("\n").slice(-6).join("\n");
+  const tail = snapshot.split("\n").slice(-WORKING_SCAN_LINES).join("\n");
   if ([...SPINNER_GLYPHS].some((g) => tail.includes(g))) return true;
   return /esc to interrupt/i.test(tail) || /\bWorking\b/.test(tail);
 }
@@ -1503,7 +1510,7 @@ export function statusMarker(status: PrEntry["status"], alive: boolean, working:
   if (status === "closed") return { icon: "✗", color: "error", label: "closed" };
   if (!alive) return { icon: "■", color: "dim", label: status === "stopped" ? "stopped" : "ended" };
   if (working) return { icon: "●", color: "success", label: "working" };
-  return { icon: "○", color: "warning", label: "idle" };
+  return { icon: "○", color: "warning", label: "waiting" };
 }
 
 /**
@@ -1534,7 +1541,9 @@ function renderPrWidget(cwd: string, theme: WidgetTheme, width: number): string[
   const lines: string[] = [theme.fg("accent", `● PR agents (${entries.length})`)];
   for (const e of entries) {
     const alive = paneAlive(e.paneId);
-    const working = alive && isWorkingSnapshot(capturePane(e.paneId, 8));
+    // Capture a wide tail so isWorkingSnapshot can find the activity line that
+    // sits above the input box (see WORKING_SCAN_LINES).
+    const working = alive && isWorkingSnapshot(capturePane(e.paneId, 40));
     const m = statusMarker(e.status, alive, working);
     const pr = e.prNumber !== undefined ? `PR #${e.prNumber} ${e.status}` : "pending";
     const head = `${theme.fg(m.color, m.icon)} ${theme.fg(m.color, m.label.padEnd(7))} ${e.id}  ${pr}  ${e.prName}`;

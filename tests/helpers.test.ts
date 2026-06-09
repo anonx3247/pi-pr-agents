@@ -113,8 +113,16 @@ describe("isWorkingSnapshot", () => {
     assert.equal(isWorkingSnapshot("foo\nbar\nesc to interrupt"), true);
   });
 
-  test("ignores activity that scrolled out of the recent tail", () => {
-    const old = `Working\n${Array.from({ length: 10 }, (_, i) => `line ${i}`).join("\n")}`;
+  test("detects an activity line that sits above the input box (not in the last 6 lines)", () => {
+    // pi renders `⠋ Working… / Esc to interrupt` ~8-10 lines from the bottom,
+    // above the input box; the wide scan window still finds it.
+    const snap = `⠋ Working… (12s · Esc to interrupt)\n${Array.from({ length: 9 }, (_, i) => `line ${i}`).join("\n")}`;
+    assert.equal(snap.split("\n").slice(-6).includes("⠋ Working… (12s · Esc to interrupt)"), false);
+    assert.equal(isWorkingSnapshot(snap), true);
+  });
+
+  test("ignores activity that scrolled out of the wide tail", () => {
+    const old = `Working\n${Array.from({ length: 30 }, (_, i) => `line ${i}`).join("\n")}`;
     assert.equal(isWorkingSnapshot(old), false);
   });
 });
@@ -133,7 +141,55 @@ describe("statusMarker", () => {
 
   test("live panes reflect the working spinner", () => {
     assert.deepEqual(statusMarker("working", true, true), { icon: "●", color: "success", label: "working" });
-    assert.deepEqual(statusMarker("open", true, false), { icon: "○", color: "warning", label: "idle" });
+    assert.deepEqual(statusMarker("open", true, false), { icon: "○", color: "warning", label: "waiting" });
+  });
+});
+
+describe("pickRedockAgent", () => {
+  const mk = (id: string, paneId: string, createdAt: string, d = 1): PrEntry =>
+    ({
+      id,
+      prName: id,
+      branch: id,
+      base: "main",
+      mode: "independent",
+      paneId,
+      worktree: `/wt/${id}`,
+      depth: d,
+      parentId: "root",
+      status: "working",
+      createdAt,
+    }) as PrEntry;
+
+  test("returns the most recently created live depth-1 agent", () => {
+    const entries = [
+      mk("a", "%1", "2026-01-01T00:00:00Z"),
+      mk("b", "%2", "2026-03-01T00:00:00Z"),
+      mk("c", "%3", "2026-02-01T00:00:00Z"),
+    ];
+    assert.equal(pickRedockAgent(entries, () => true)?.id, "b");
+  });
+
+  test("skips dead panes and non-depth-1 entries", () => {
+    const entries = [
+      mk("a", "%1", "2026-01-01T00:00:00Z"),
+      mk("helper", "%2", "2026-09-01T00:00:00Z", 2),
+      mk("b", "%3", "2026-02-01T00:00:00Z"),
+    ];
+    const alive = (p: string) => p !== "%1";
+    assert.equal(pickRedockAgent(entries, alive)?.id, "b");
+  });
+
+  test("returns undefined when there are no live agents", () => {
+    const entries = [mk("a", "%1", "2026-01-01T00:00:00Z")];
+    assert.equal(
+      pickRedockAgent(entries, () => false),
+      undefined,
+    );
+    assert.equal(
+      pickRedockAgent([], () => true),
+      undefined,
+    );
   });
 });
 
