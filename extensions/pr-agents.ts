@@ -1039,6 +1039,11 @@ function dockable(paneId: string | undefined): paneId is string {
   return insideTmux() && Boolean(orchestratorPane) && Boolean(paneId) && paneId !== orchestratorPane;
 }
 
+/** The registry entry currently shown in a tmux pane, if any. */
+function entryByPane(cwd: string, paneId: string): PrEntry | undefined {
+  return loadRegistry(cwd).find((e) => e.paneId === paneId);
+}
+
 /**
  * Send the currently-docked agent's pane back to its own hidden background
  * window (break-pane -d). Guarded so the orchestrator pane is never broken.
@@ -1050,7 +1055,7 @@ function undockCurrent(cwd: string): void {
     return;
   }
   if (paneAlive(pane)) {
-    const entry = loadRegistry(cwd).find((e) => e.paneId === pane);
+    const entry = entryByPane(cwd, pane);
     const name = entry ? windowName(entry) : "pr";
     tryTmux(["break-pane", "-d", "-s", pane, "-n", name]);
   }
@@ -1074,7 +1079,7 @@ function dockAgent(cwd: string, paneId: string): void {
   tryTmux(["select-layout", "-t", target, "main-vertical"]);
   tryTmux(["set-window-option", "-t", target, "main-pane-width", "60%"]);
   dockedPaneId = paneId;
-  const entry = loadRegistry(cwd).find((e) => e.paneId === paneId);
+  const entry = entryByPane(cwd, paneId);
   if (entry) setPaneTitle(paneId, paneTitle(entry));
 }
 
