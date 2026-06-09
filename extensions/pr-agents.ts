@@ -550,9 +550,6 @@ function runCleanup(cwd: string, dryRun: boolean): CleanupResult {
     if (wt === root) continue;
     if (!wt.includes(`.worktrees${path.sep}`) && !wt.includes(".worktrees/")) continue;
     if (survivors.some((s) => s.worktree === wt)) continue;
-    if (removed.some((b) => wtList.includes(b))) {
-      /* already handled by branch removal */
-    }
     if (entries.some((e) => e.worktree === wt)) continue; // handled above
     if (!fs.existsSync(wt)) continue;
     lines.push(`${dryRun ? "would prune" : "pruning"} orphan worktree ${wt}`);
@@ -1190,5 +1187,4 @@ export default function (pi: ExtensionAPI) {
   }
 
   // Depth >= 2 (helpers): no dispatch tools are registered — they just work.
-  void os;
 }
