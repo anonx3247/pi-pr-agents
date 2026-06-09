@@ -92,6 +92,21 @@ function runGh(args: string[], cwd: string): unknown {
   }
 }
 
+/**
+ * Run a `gh api` call (or any gh command whose stdout is raw JSON) and return
+ * the parsed value, or `null` on any failure. Unlike {@link runGh}, this parses
+ * even when `--json` is absent (gh api emits JSON without that flag).
+ */
+function runGhApiJson(args: string[], cwd: string): unknown {
+  const out = runGh(args, cwd);
+  if (typeof out !== "string") return null;
+  try {
+    return JSON.parse(out);
+  } catch {
+    return null;
+  }
+}
+
 function tmux(args: string[]): string {
   return execFileSync("tmux", args, { stdio: "pipe", timeout: 10000 }).toString().trim();
 }
@@ -617,6 +632,267 @@ export function buildCleanupNotification(
     "",
     "Run cleanup now: call cleanup_pr_worktrees to remove its worktree, branch, and tmux window.",
   ].join("\n");
+}
+
+// ---------------------------------------------------------------------------
+// Review-comment loop (pure helpers + types)
+//
+// A PR subagent (depth 1) polls its OWN PR for new reviewer feedback and, when
+// new inline comments arrive, injects a task into a fresh turn to address them,
+// push, and reply (without resolving threads). The selection of what is NEW and
+// the task message are kept pure (no gh/exec/IO) so they can be unit-tested.
+// ---------------------------------------------------------------------------
+
+/** Poll interval (ms) for a subagent checking its own PR for review activity. */
+export const REVIEW_POLL_MS = 30000;
+
+/** An actionable inline review comment (a file/line comment on the PR diff). */
+export interface InlineComment {
+  id: number;
+  user: string;
+  body: string;
+  path: string;
+  line: number | null;
+  createdAt: string;
+  inReplyToId: number | null;
+}
+
+/** A review summary (gh pr view --json reviews) — surfaced as context. */
+export interface ReviewSummary {
+  id?: number;
+  author: string;
+  body: string;
+  state: string;
+  submittedAt: string;
+}
+
+/** A general PR (issue) comment (gh pr view --json comments) — surfaced as context. */
+export interface IssueComment {
+  id?: number;
+  author: string;
+  body: string;
+  createdAt: string;
+}
+
+/** Everything the poller fetches for one PR in a single tick. */
+export interface FetchedReviewActivity {
+  inline: InlineComment[];
+  reviews: ReviewSummary[];
+  issueComments: IssueComment[];
+}
+
+/** Result of {@link selectNewReviewItems}: the actionable + context split. */
+export interface NewReviewSelection {
+  actionable: InlineComment[];
+  contextNotes: string[];
+  newIds: string[];
+}
+
+/**
+ * Select the NEW review items from a fetched tick against the seen-set. Ids are
+ * keyed distinctly so the three kinds never collide: inline comments `rc:<id>`,
+ * review summaries `rv:<id|submittedAt+author>`, issue comments
+ * `ic:<id|createdAt+author>`. Inline comments are the actionable items; non-empty
+ * review/issue bodies become context notes. `newIds` carries EVERY surfaced key
+ * (actionable + context) so the caller can mark them all seen and never
+ * re-surface them — including the subagent's OWN replies, which the reply tool
+ * records into seen immediately. Pure: no IO.
+ */
+export function selectNewReviewItems(fetched: FetchedReviewActivity, seen: ReadonlySet<string>): NewReviewSelection {
+  const actionable: InlineComment[] = [];
+  const contextNotes: string[] = [];
+  const newIds: string[] = [];
+
+  for (const c of fetched.inline) {
+    const key = `rc:${c.id}`;
+    if (seen.has(key) || newIds.includes(key)) continue;
+    actionable.push(c);
+    newIds.push(key);
+  }
+
+  for (const r of fetched.reviews) {
+    const body = (r.body ?? "").trim();
+    if (!body) continue;
+    const state = (r.state ?? "").toUpperCase();
+    if (state !== "COMMENTED" && state !== "CHANGES_REQUESTED") continue;
+    const key = `rv:${r.id ?? `${r.submittedAt}+${r.author}`}`;
+    if (seen.has(key) || newIds.includes(key)) continue;
+    contextNotes.push(`review by ${r.author || "?"} (${state}): ${body}`);
+    newIds.push(key);
+  }
+
+  for (const c of fetched.issueComments) {
+    const body = (c.body ?? "").trim();
+    if (!body) continue;
+    const key = `ic:${c.id ?? `${c.createdAt}+${c.author}`}`;
+    if (seen.has(key) || newIds.includes(key)) continue;
+    contextNotes.push(`comment by ${c.author || "?"}: ${body}`);
+    newIds.push(key);
+  }
+
+  return { actionable, contextNotes, newIds };
+}
+
+/**
+ * Build the task message handed to the subagent when new inline review comments
+ * arrive. Lists each comment as `- [rc:<id>] <path>:<line> — <body>` plus any
+ * context notes, then the fixed instructions: address with code, run the gate,
+ * commit, push, and REPLY to each thread via `reply_to_review_comment` WITHOUT
+ * resolving threads. Pure: no IO.
+ */
+export function buildReviewTask(
+  actionable: readonly InlineComment[],
+  contextNotes: readonly string[],
+  prNumber: number,
+): string {
+  const lines: string[] = [
+    `New review feedback on PR #${prNumber}. Address each reviewer comment below.`,
+    "",
+    "Inline review comments:",
+  ];
+  for (const c of actionable) {
+    const loc = c.line != null ? `${c.path}:${c.line}` : c.path;
+    lines.push(`- [rc:${c.id}] ${loc} — ${c.body}`);
+  }
+  if (contextNotes.length > 0) {
+    lines.push("", "Additional context:");
+    for (const n of contextNotes) lines.push(`- ${n}`);
+  }
+  lines.push(
+    "",
+    [
+      "Address each comment with code changes; run `npm run typecheck && npm run lint && npm test`;",
+      "commit (e.g. `fix: address review feedback`); push with `git push`; then REPLY to EACH inline",
+      "thread using the `reply_to_review_comment` tool (commentId = the numeric id from `rc:<id>`,",
+      "body = a short explanation of the fix or a clarifying question). Do NOT resolve threads — leave",
+      "that to the reviewer. If a comment is ambiguous or architectural, reply asking for clarification",
+      "instead of guessing.",
+    ].join(" "),
+  );
+  return lines.join("\n");
+}
+
+/**
+ * Fetch all review activity for one PR (inline comments + review summaries +
+ * issue comments) via gh. Tolerates nulls/missing fields everywhere: any gh
+ * failure yields an empty slice so the feature degrades to a no-op. IO; not pure.
+ */
+function fetchReviewActivity(owner: string, repo: string, prNumber: number, cwd: string): FetchedReviewActivity {
+  const inline: InlineComment[] = [];
+  const rawInline = runGhApiJson(["api", "--paginate", `repos/${owner}/${repo}/pulls/${prNumber}/comments`], cwd);
+  if (Array.isArray(rawInline)) {
+    for (const c of rawInline) {
+      if (!c || typeof c !== "object") continue;
+      const o = c as Record<string, unknown>;
+      const id = Number(o.id);
+      if (!Number.isFinite(id)) continue;
+      const user = (o.user as { login?: unknown } | null)?.login;
+      const line = o.line ?? o.original_line ?? null;
+      inline.push({
+        id,
+        user: typeof user === "string" ? user : "",
+        body: typeof o.body === "string" ? o.body : "",
+        path: typeof o.path === "string" ? o.path : "",
+        line: typeof line === "number" ? line : null,
+        createdAt: typeof o.created_at === "string" ? o.created_at : "",
+        inReplyToId: typeof o.in_reply_to_id === "number" ? o.in_reply_to_id : null,
+      });
+    }
+  }
+
+  const reviews: ReviewSummary[] = [];
+  const rv = runGh(["pr", "view", String(prNumber), "--json", "reviews"], cwd) as { reviews?: unknown } | null;
+  if (rv && Array.isArray(rv.reviews)) {
+    for (const r of rv.reviews) {
+      if (!r || typeof r !== "object") continue;
+      const o = r as Record<string, unknown>;
+      reviews.push({
+        id: typeof o.id === "number" ? o.id : undefined,
+        author: ((o.author as { login?: unknown } | null)?.login as string) ?? "",
+        body: typeof o.body === "string" ? o.body : "",
+        state: typeof o.state === "string" ? o.state : "",
+        submittedAt: typeof o.submittedAt === "string" ? o.submittedAt : "",
+      });
+    }
+  }
+
+  const issueComments: IssueComment[] = [];
+  const ic = runGh(["pr", "view", String(prNumber), "--json", "comments"], cwd) as { comments?: unknown } | null;
+  if (ic && Array.isArray(ic.comments)) {
+    for (const c of ic.comments) {
+      if (!c || typeof c !== "object") continue;
+      const o = c as Record<string, unknown>;
+      issueComments.push({
+        id: typeof o.id === "number" ? o.id : undefined,
+        author: ((o.author as { login?: unknown } | null)?.login as string) ?? "",
+        body: typeof o.body === "string" ? o.body : "",
+        createdAt: typeof o.createdAt === "string" ? o.createdAt : "",
+      });
+    }
+  }
+
+  return { inline, reviews, issueComments };
+}
+
+/**
+ * Post an inline reply to a review comment thread via gh, passing the body over
+ * stdin so it is always treated as a literal string (no shell/quoting issues).
+ * Returns the created reply's numeric id, or `null` on any failure. A reply does
+ * NOT resolve the thread — exactly the desired behavior.
+ */
+function postReviewReply(
+  owner: string,
+  repo: string,
+  prNumber: number,
+  commentId: number,
+  body: string,
+  cwd: string,
+): number | null {
+  let out: string;
+  try {
+    out = execFileSync(
+      "gh",
+      ["api", "-X", "POST", `repos/${owner}/${repo}/pulls/${prNumber}/comments/${commentId}/replies`, "-F", "body=@-"],
+      { cwd, input: body, stdio: ["pipe", "pipe", "pipe"], timeout: 15000 },
+    )
+      .toString()
+      .trim();
+  } catch {
+    return null;
+  }
+  try {
+    const id = (JSON.parse(out) as { id?: unknown }).id;
+    return typeof id === "number" ? id : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Resolve `owner/name` for the current repo via gh, or `null` if unavailable.
+ */
+function resolveOwnerRepo(cwd: string): { owner: string; repo: string } | null {
+  const j = runGh(["repo", "view", "--json", "nameWithOwner"], cwd) as { nameWithOwner?: unknown } | null;
+  const nwo = j?.nameWithOwner;
+  if (typeof nwo !== "string" || !nwo.includes("/")) return null;
+  const [owner, repo] = nwo.split("/");
+  return owner && repo ? { owner, repo } : null;
+}
+
+/**
+ * Merge `newIds` into an entry's `seenReviewIds` as a UNION (never overwrite),
+ * reading the latest registry first so the poller and the reply tool can both
+ * add ids without clobbering each other. Best-effort: missing entry => no-op.
+ */
+function mergeSeenReviewIds(cwd: string, id: string, newIds: readonly string[]): void {
+  if (newIds.length === 0) return;
+  const entries = loadRegistry(cwd);
+  const idx = entries.findIndex((e) => e.id === id);
+  if (idx === -1) return;
+  const union = new Set(entries[idx].seenReviewIds ?? []);
+  for (const x of newIds) union.add(x);
+  entries[idx] = { ...entries[idx], seenReviewIds: [...union] };
+  saveRegistry(cwd, entries);
 }
 
 // ---------------------------------------------------------------------------
