@@ -148,6 +148,21 @@ the main repo and every worktree, so each agent sees the same set of PRs.
 - `PI_PR_DEPTH` / `PI_PR_SIMPLIFY` — set automatically on dispatched subagents;
   you don't set these by hand.
 
+## Tests
+
+The pure, deterministic helpers in `extensions/pr-agents.ts` (slug/quote
+formatting, registry round-trips, shell detection, etc.) are unit-tested with
+Node's built-in test runner (`node:test`), executed straight from TypeScript via
+[`tsx`](https://github.com/privatenumber/tsx) — no build step or heavy test
+framework.
+
+```bash
+npm install
+npm test
+```
+
+Tests live in `tests/` and are excluded from the published npm tarball.
+
 ## Publishing (maintainers)
 
 The package is published to npm as [`pi-pr-agents`](https://www.npmjs.com/package/pi-pr-agents)
