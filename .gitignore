@@ -3,3 +3,5 @@ pi-session-*.html
 # PR-agent worktrees live in a sibling *.worktrees dir, never inside the repo
 *.worktrees/
 node_modules/
+# TypeScript incremental build metadata
+*.tsbuildinfo
