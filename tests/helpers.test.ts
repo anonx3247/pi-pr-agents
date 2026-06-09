@@ -602,14 +602,8 @@ describe("registry round-trip", () => {
 });
 
 describe("worktreesDirFrom", () => {
-  test("nests .worktrees under the repo root", () => {
-    assert.equal(worktreesDirFrom("/a/b/repo"), path.join("/a/b/repo", ".worktrees"));
-  });
-
-  test("stays inside the repo root (not a sibling dir)", () => {
+  test("nests .worktrees inside the repo root, not a sibling dir", () => {
     const root = "/a/b/repo";
-    const dir = worktreesDirFrom(root);
-    assert.equal(path.dirname(dir), root);
-    assert.equal(path.basename(dir), ".worktrees");
+    assert.equal(worktreesDirFrom(root), path.join(root, ".worktrees"));
   });
 });
