@@ -37,7 +37,14 @@
     "test": "tsx --test tests/*.test.ts"
   },
   "devDependencies": {
-    "tsx": "^4"
+    "@earendil-works/pi-agent-core": "^0.79.0",
+    "@earendil-works/pi-ai": "^0.79.0",
+    "@earendil-works/pi-coding-agent": "^0.79.0",
+    "@earendil-works/pi-tui": "^0.79.0",
+    "@types/node": "^20",
+    "tsx": "^4",
+    "typebox": "^1",
+    "typescript": "^5"
   },
   "publishConfig": {
     "access": "public"
