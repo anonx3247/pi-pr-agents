@@ -44,7 +44,7 @@ Non-negotiable rules:
 
    The same poller also watches your PR's **CI checks**. When a check fails it
    hands you a fresh task: reproduce locally with the gate
-   (`npm run typecheck && npm run lint && npm test`), fix the cause, commit, and
+   (`npm run typecheck && npm run lint:ci && npm test`), fix the cause, commit, and
    `git push` (inspect logs with `gh run view --log-failed` if it's
    environment-specific). **Never disable or weaken checks to make CI pass.**
    Failures are deduped once per commit, so a still-failing check re-notifies
