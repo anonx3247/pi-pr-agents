@@ -1205,7 +1205,9 @@ export default function (pi: ExtensionAPI) {
           params.task,
           ``,
           `Follow the pr-worker skill. Make an atomic commit after every coherent change.${
-            entry.simplify ? " Before opening the PR, run /simplify on your diff and commit the result." : ""
+            entry.simplify
+              ? " Before opening the PR, call the simplify_diff tool to run /simplify on your diff, then commit the result."
+              : ""
           } When you open the PR, call set_pr_number so this pane gets labelled.`,
         ].join("\n");
 
@@ -1416,6 +1418,38 @@ export default function (pi: ExtensionAPI) {
         });
         if (entry && insideTmux() && entry.paneId) setPaneTitle(entry.paneId, paneTitle(entry));
         return { content: [{ type: "text", text: `Recorded PR #${params.number}.` }] };
+      },
+    });
+
+    registerTextTool(pi, {
+      name: "simplify_diff",
+      label: "Simplify diff",
+      description:
+        "Run pi-simplify's /simplify on your current branch diff to tidy the changed code before opening the PR. An autonomous agent cannot invoke a slash command directly, so this tool queues /simplify to run in your own session right after this turn. When it completes, review the changes and commit them as an atomic 'refactor: simplify' commit. Typically used when the orchestrator requested simplification (PI_PR_SIMPLIFY=1).",
+      promptGuidelines: [
+        "Use simplify_diff to run /simplify on your diff before opening the PR when simplification was requested (PI_PR_SIMPLIFY=1).",
+      ],
+      parameters: Type.Object({}),
+      async execute() {
+        try {
+          // deliverAs "followUp": the tool runs mid-turn (streaming), so queue
+          // "/simplify" to be delivered as a user message after this turn's
+          // tools finish, which triggers pi-simplify in this worker's session.
+          pi.sendUserMessage("/simplify", { deliverAs: "followUp" });
+          return {
+            content: [
+              {
+                type: "text",
+                text: "Queued /simplify to run on your diff after this turn. When it completes, review the changes and commit them as an atomic 'refactor: simplify' commit, then continue to open the PR.",
+              },
+            ],
+          };
+        } catch (err) {
+          return {
+            content: [{ type: "text", text: `Failed to queue /simplify: ${(err as Error).message}` }],
+            isError: true,
+          };
+        }
       },
     });
 
