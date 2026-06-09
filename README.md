@@ -1,4 +1,4 @@
-# @anas/pi-pr-agents
+# pi-pr-agents
 
 A [pi](https://pi.dev) package that turns one persistent **main agent** into a PR
 orchestrator. You give it work; it splits the work into small pull requests and
