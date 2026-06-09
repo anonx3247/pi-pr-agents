@@ -42,7 +42,9 @@ jobs:
             exit 1
           fi
 
+      # --provenance works here because the job has id-token: write (OIDC).
+      # Locally, plain `npm publish` is used instead (no provenance).
       - name: Publish
-        run: npm publish
+        run: npm publish --provenance
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
