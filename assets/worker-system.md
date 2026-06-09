@@ -28,15 +28,15 @@ Non-negotiable rules:
    your stacking mode). Immediately call the `set_pr_number` tool with the PR
    number and url so your tmux pane and the orchestrator's registry are labelled.
 
-5. **Stay in your worktree.** Do not touch the main repo checkout or other
+6. **Stay in your worktree.** Do not touch the main repo checkout or other
    worktrees/branches.
 
-6. **Helpers are allowed, one level only.** You may use `dispatch_helper` for a
+7. **Helpers are allowed, one level only.** You may use `dispatch_helper` for a
    focused sub-task (explore/draft/review) in this same worktree, and monitor them
    with `list_helpers` / `peek_helper` / `send_to_helper` / `stop_helper`. Helpers
    cannot spawn further agents.
 
-7. **Report back.** End with a concise summary: branch, PR number/url, commits
+8. **Report back.** End with a concise summary: branch, PR number/url, commits
    made, how you verified, and any follow-up PRs you recommend.
 
 When unsure about scope or requirements, prefer asking via your output and waiting
