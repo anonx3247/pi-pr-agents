@@ -569,6 +569,158 @@ function runCleanup(cwd: string, dryRun: boolean): CleanupResult {
 }
 
 // ---------------------------------------------------------------------------
+// Pane-control tools (shared by depth-0 PR agents and depth-1 helpers)
+// ---------------------------------------------------------------------------
+
+interface ToolTextResult {
+  content: { type: "text"; text: string }[];
+  isError?: boolean;
+  details?: unknown;
+}
+
+/**
+ * Resolve a registry entry or short-circuit with the standard "not found"
+ * error. Keeps the find+guard boilerplate out of every tool body. The error
+ * wording ("No <noun> matching '<ref>'.") is preserved verbatim per noun.
+ */
+function withEntry(
+  entry: PrEntry | undefined,
+  noun: string,
+  ref: string,
+  fn: (entry: PrEntry) => ToolTextResult,
+): ToolTextResult {
+  if (!entry) {
+    return { content: [{ type: "text", text: `No ${noun} matching '${ref}'.` }], isError: true };
+  }
+  return fn(entry);
+}
+
+interface PaneToolMeta {
+  name: string;
+  label: string;
+  description: string;
+  promptGuidelines?: string[];
+}
+
+interface PaneControlConfig {
+  noun: string;
+  idDescription: string;
+  resolve: (cwd: string, ref: string) => PrEntry | undefined;
+  list: PaneToolMeta & {
+    empty: string;
+    entries: (cwd: string) => PrEntry[];
+    row: (e: PrEntry) => string;
+    details?: (entries: PrEntry[]) => unknown;
+  };
+  peek: PaneToolMeta & {
+    linesDescription: string;
+    header: (e: PrEntry) => string;
+    paneDead: (paneId: string) => string;
+    details?: (e: PrEntry) => unknown;
+  };
+  send: PaneToolMeta & {
+    messageDescription: string;
+    success: (e: PrEntry) => string;
+    paneDead: (paneId: string) => string;
+  };
+  stop: PaneToolMeta & {
+    paneDead: (paneId: string) => string;
+    result: (mode: "interrupt" | "kill", e: PrEntry) => string;
+  };
+}
+
+/**
+ * Register the list/peek/send/stop quartet for one kind of subagent. The
+ * depth-0 PR tools and depth-1 helper tools differ only in which registry
+ * entries they resolve over plus some label/wording strings, all captured in
+ * `cfg`, so the runtime behaviour is identical to the hand-written tools.
+ */
+function registerPaneControlTools(pi: ExtensionAPI, cfg: PaneControlConfig): void {
+  pi.registerTool({
+    name: cfg.list.name,
+    label: cfg.list.label,
+    description: cfg.list.description,
+    ...(cfg.list.promptGuidelines ? { promptGuidelines: cfg.list.promptGuidelines } : {}),
+    parameters: Type.Object({}),
+    async execute(_id, _params, _signal, _onUpdate, ctx) {
+      const entries = cfg.list.entries(ctx.cwd);
+      if (entries.length === 0) {
+        return { content: [{ type: "text", text: cfg.list.empty }] };
+      }
+      const result: ToolTextResult = {
+        content: [{ type: "text", text: entries.map(cfg.list.row).join("\n") }],
+      };
+      if (cfg.list.details) result.details = cfg.list.details(entries);
+      return result;
+    },
+  });
+
+  pi.registerTool({
+    name: cfg.peek.name,
+    label: cfg.peek.label,
+    description: cfg.peek.description,
+    ...(cfg.peek.promptGuidelines ? { promptGuidelines: cfg.peek.promptGuidelines } : {}),
+    parameters: Type.Object({
+      id: Type.String({ description: cfg.idDescription }),
+      lines: Type.Optional(Type.Integer({ description: cfg.peek.linesDescription })),
+    }),
+    async execute(_id, params, _signal, _onUpdate, ctx) {
+      return withEntry(cfg.resolve(ctx.cwd, params.id), cfg.noun, params.id, (entry) => {
+        const snap = capturePane(entry.paneId, params.lines ?? 60);
+        if (snap === null) {
+          return { content: [{ type: "text", text: cfg.peek.paneDead(entry.paneId) }], isError: true };
+        }
+        const result: ToolTextResult = {
+          content: [{ type: "text", text: `${cfg.peek.header(entry)}\n${snap}` }],
+        };
+        if (cfg.peek.details) result.details = cfg.peek.details(entry);
+        return result;
+      });
+    },
+  });
+
+  pi.registerTool({
+    name: cfg.send.name,
+    label: cfg.send.label,
+    description: cfg.send.description,
+    ...(cfg.send.promptGuidelines ? { promptGuidelines: cfg.send.promptGuidelines } : {}),
+    parameters: Type.Object({
+      id: Type.String({ description: cfg.idDescription }),
+      message: Type.String({ description: cfg.send.messageDescription }),
+    }),
+    async execute(_id, params, _signal, _onUpdate, ctx) {
+      return withEntry(cfg.resolve(ctx.cwd, params.id), cfg.noun, params.id, (entry) => {
+        if (!sendToPane(entry.paneId, params.message)) {
+          return { content: [{ type: "text", text: cfg.send.paneDead(entry.paneId) }], isError: true };
+        }
+        return { content: [{ type: "text", text: cfg.send.success(entry) }] };
+      });
+    },
+  });
+
+  pi.registerTool({
+    name: cfg.stop.name,
+    label: cfg.stop.label,
+    description: cfg.stop.description,
+    ...(cfg.stop.promptGuidelines ? { promptGuidelines: cfg.stop.promptGuidelines } : {}),
+    parameters: Type.Object({
+      id: Type.String({ description: cfg.idDescription }),
+      mode: Type.Optional(StringEnum(["interrupt", "kill"] as const, { description: "interrupt (default) or kill." })),
+    }),
+    async execute(_id, params, _signal, _onUpdate, ctx) {
+      return withEntry(cfg.resolve(ctx.cwd, params.id), cfg.noun, params.id, (entry) => {
+        const mode = (params.mode ?? "interrupt") as "interrupt" | "kill";
+        if (!stopPane(entry.paneId, mode)) {
+          return { content: [{ type: "text", text: cfg.stop.paneDead(entry.paneId) }], isError: true };
+        }
+        if (mode === "kill") updateEntry(ctx.cwd, entry.id, { status: "stopped" });
+        return { content: [{ type: "text", text: cfg.stop.result(mode, entry) }] };
+      });
+    },
+  });
+}
+
+// ---------------------------------------------------------------------------
 // Extension entry point
 // ---------------------------------------------------------------------------
 
@@ -805,23 +957,55 @@ export default function (pi: ExtensionAPI) {
       },
     });
 
-    pi.registerTool({
-      name: "list_pr_agents",
-      label: "List PR agents",
-      description: "List every dispatched PR subagent with its PR number/name, branch, mode, tmux pane and live status.",
-      promptGuidelines: ["Use list_pr_agents to review the current set of in-flight PRs before dispatching more."],
-      parameters: Type.Object({}),
-      async execute(_id, _params, _signal, _onUpdate, ctx) {
-        const entries = loadRegistry(ctx.cwd).filter((e) => e.depth === 1);
-        if (entries.length === 0) {
-          return { content: [{ type: "text", text: "No PR agents dispatched yet." }] };
-        }
-        const rows = entries.map((e) => {
+    registerPaneControlTools(pi, {
+      noun: "PR agent",
+      idDescription: "PR id, branch, name, or #number.",
+      resolve: (cwd, ref) => findEntry(loadRegistry(cwd), ref),
+      list: {
+        name: "list_pr_agents",
+        label: "List PR agents",
+        description: "List every dispatched PR subagent with its PR number/name, branch, mode, tmux pane and live status.",
+        promptGuidelines: ["Use list_pr_agents to review the current set of in-flight PRs before dispatching more."],
+        empty: "No PR agents dispatched yet.",
+        entries: (cwd) => loadRegistry(cwd).filter((e) => e.depth === 1),
+        row: (e) => {
           const alive = paneAlive(e.paneId) ? "live" : "ended";
           const pr = e.prNumber !== undefined ? `#${e.prNumber}` : "(no PR yet)";
           return `${e.id}  ${pr}  ${e.prName}\n      branch=${e.branch} base=${e.base} mode=${e.mode} pane=${e.paneId} status=${e.status}/${alive}`;
-        });
-        return { content: [{ type: "text", text: rows.join("\n") }], details: { entries } };
+        },
+        details: (entries) => ({ entries }),
+      },
+      peek: {
+        name: "peek_pr_agent",
+        label: "Peek PR agent",
+        description:
+          "Check in on a PR subagent by capturing the recent output of its tmux pane (what it's currently doing / its progress). Read-only; does not interrupt it.",
+        promptGuidelines: ["Use peek_pr_agent to see a subagent's progress before steering or stopping it."],
+        linesDescription: "How many recent lines to capture (default 60).",
+        header: (e) => `--- ${e.prName} (${e.paneId}) ---`,
+        paneDead: (paneId) => `Pane ${paneId} is no longer live.`,
+        details: (e) => ({ id: e.id, paneId: e.paneId }),
+      },
+      send: {
+        name: "send_to_pr_agent",
+        label: "Send to PR agent",
+        description: "Type a message into a PR subagent's pi session and submit it (steer it, answer a question, or give follow-up work).",
+        promptGuidelines: ["Use send_to_pr_agent to give a running PR subagent follow-up instructions instead of editing code yourself."],
+        messageDescription: "Message to send to the subagent.",
+        success: (e) => `Sent to ${e.prName} (${e.paneId}).`,
+        paneDead: (paneId) => `Pane ${paneId} is no longer live.`,
+      },
+      stop: {
+        name: "stop_pr_agent",
+        label: "Stop PR agent",
+        description:
+          "Stop a PR subagent. mode 'interrupt' aborts its current turn (Escape) but keeps the session alive so you can re-steer it with send_to_pr_agent; mode 'kill' closes the pane entirely (the worktree and branch are kept for inspection).",
+        promptGuidelines: ["Use stop_pr_agent to halt a subagent that is going the wrong way, then send_to_pr_agent to redirect it."],
+        paneDead: (paneId) => `Pane ${paneId} is no longer live.`,
+        result: (mode, e) =>
+          mode === "kill"
+            ? `Killed ${e.prName} (${e.paneId}). Worktree ${e.worktree} and branch ${e.branch} are kept.`
+            : `Interrupted ${e.prName} (${e.paneId}). Use send_to_pr_agent to give it new instructions.`,
       },
     });
 
@@ -833,89 +1017,13 @@ export default function (pi: ExtensionAPI) {
         id: Type.String({ description: "PR id, branch, name, or #number." }),
       }),
       async execute(_id, params, _signal, _onUpdate, ctx) {
-        const entry = findEntry(loadRegistry(ctx.cwd), params.id);
-        if (!entry) return { content: [{ type: "text", text: `No PR agent matching '${params.id}'.` }], isError: true };
-        tryTmux(["select-window", "-t", entry.paneId]);
-        const ok = tryTmux(["select-pane", "-t", entry.paneId]);
-        return {
-          content: [{ type: "text", text: ok === null ? "Pane no longer exists." : `Focused ${entry.prName} (${entry.paneId}).` }],
-        };
-      },
-    });
-
-    pi.registerTool({
-      name: "peek_pr_agent",
-      label: "Peek PR agent",
-      description:
-        "Check in on a PR subagent by capturing the recent output of its tmux pane (what it's currently doing / its progress). Read-only; does not interrupt it.",
-      promptGuidelines: ["Use peek_pr_agent to see a subagent's progress before steering or stopping it."],
-      parameters: Type.Object({
-        id: Type.String({ description: "PR id, branch, name, or #number." }),
-        lines: Type.Optional(Type.Integer({ description: "How many recent lines to capture (default 60)." })),
-      }),
-      async execute(_id, params, _signal, _onUpdate, ctx) {
-        const entry = findEntry(loadRegistry(ctx.cwd), params.id);
-        if (!entry) return { content: [{ type: "text", text: `No PR agent matching '${params.id}'.` }], isError: true };
-        const snap = capturePane(entry.paneId, params.lines ?? 60);
-        if (snap === null) {
-          return { content: [{ type: "text", text: `Pane ${entry.paneId} is no longer live.` }], isError: true };
-        }
-        return {
-          content: [{ type: "text", text: `--- ${entry.prName} (${entry.paneId}) ---\n${snap}` }],
-          details: { id: entry.id, paneId: entry.paneId },
-        };
-      },
-    });
-
-    pi.registerTool({
-      name: "stop_pr_agent",
-      label: "Stop PR agent",
-      description:
-        "Stop a PR subagent. mode 'interrupt' aborts its current turn (Escape) but keeps the session alive so you can re-steer it with send_to_pr_agent; mode 'kill' closes the pane entirely (the worktree and branch are kept for inspection).",
-      promptGuidelines: ["Use stop_pr_agent to halt a subagent that is going the wrong way, then send_to_pr_agent to redirect it."],
-      parameters: Type.Object({
-        id: Type.String({ description: "PR id, branch, name, or #number." }),
-        mode: Type.Optional(StringEnum(["interrupt", "kill"] as const, { description: "interrupt (default) or kill." })),
-      }),
-      async execute(_id, params, _signal, _onUpdate, ctx) {
-        const entry = findEntry(loadRegistry(ctx.cwd), params.id);
-        if (!entry) return { content: [{ type: "text", text: `No PR agent matching '${params.id}'.` }], isError: true };
-        const mode = (params.mode ?? "interrupt") as "interrupt" | "kill";
-        const ok = stopPane(entry.paneId, mode);
-        if (!ok) return { content: [{ type: "text", text: `Pane ${entry.paneId} is no longer live.` }], isError: true };
-        if (mode === "kill") updateEntry(ctx.cwd, entry.id, { status: "stopped" });
-        return {
-          content: [
-            {
-              type: "text",
-              text:
-                mode === "kill"
-                  ? `Killed ${entry.prName} (${entry.paneId}). Worktree ${entry.worktree} and branch ${entry.branch} are kept.`
-                  : `Interrupted ${entry.prName} (${entry.paneId}). Use send_to_pr_agent to give it new instructions.`,
-            },
-          ],
-        };
-      },
-    });
-
-    pi.registerTool({
-      name: "send_to_pr_agent",
-      label: "Send to PR agent",
-      description: "Type a message into a PR subagent's pi session and submit it (steer it, answer a question, or give follow-up work).",
-      promptGuidelines: ["Use send_to_pr_agent to give a running PR subagent follow-up instructions instead of editing code yourself."],
-      parameters: Type.Object({
-        id: Type.String({ description: "PR id, branch, name, or #number." }),
-        message: Type.String({ description: "Message to send to the subagent." }),
-      }),
-      async execute(_id, params, _signal, _onUpdate, ctx) {
-        const entry = findEntry(loadRegistry(ctx.cwd), params.id);
-        if (!entry) return { content: [{ type: "text", text: `No PR agent matching '${params.id}'.` }], isError: true };
-        if (!paneAlive(entry.paneId)) {
-          return { content: [{ type: "text", text: `Pane ${entry.paneId} is no longer live.` }], isError: true };
-        }
-        tryTmux(["send-keys", "-t", entry.paneId, "-l", "--", params.message]);
-        tryTmux(["send-keys", "-t", entry.paneId, "Enter"]);
-        return { content: [{ type: "text", text: `Sent to ${entry.prName} (${entry.paneId}).` }] };
+        return withEntry(findEntry(loadRegistry(ctx.cwd), params.id), "PR agent", params.id, (entry) => {
+          tryTmux(["select-window", "-t", entry.paneId]);
+          const ok = tryTmux(["select-pane", "-t", entry.paneId]);
+          return {
+            content: [{ type: "text", text: ok === null ? "Pane no longer exists." : `Focused ${entry.prName} (${entry.paneId}).` }],
+          };
+        });
       },
     });
 
@@ -1044,69 +1152,41 @@ export default function (pi: ExtensionAPI) {
       const me = process.env.PI_PR_ID ?? "root";
       return loadRegistry(cwd).filter((e) => e.depth === 2 && e.parentId === me);
     };
-    const findHelper = (cwd: string, ref: string) => findEntry(myHelpers(cwd), ref);
 
-    pi.registerTool({
-      name: "list_helpers",
-      label: "List helpers",
-      description: "List the helper subagents you spawned in this worktree, with their pane and live status.",
-      parameters: Type.Object({}),
-      async execute(_id, _params, _signal, _onUpdate, ctx) {
-        const hs = myHelpers(ctx.cwd);
-        if (hs.length === 0) return { content: [{ type: "text", text: "No helpers spawned." }] };
-        const rows = hs.map((e) => `${e.id}  ${e.prName}  pane=${e.paneId}  ${paneAlive(e.paneId) ? "live" : "ended"}`);
-        return { content: [{ type: "text", text: rows.join("\n") }] };
+    registerPaneControlTools(pi, {
+      noun: "helper",
+      idDescription: "Helper id or name.",
+      resolve: (cwd, ref) => findEntry(myHelpers(cwd), ref),
+      list: {
+        name: "list_helpers",
+        label: "List helpers",
+        description: "List the helper subagents you spawned in this worktree, with their pane and live status.",
+        empty: "No helpers spawned.",
+        entries: (cwd) => myHelpers(cwd),
+        row: (e) => `${e.id}  ${e.prName}  pane=${e.paneId}  ${paneAlive(e.paneId) ? "live" : "ended"}`,
       },
-    });
-
-    pi.registerTool({
-      name: "peek_helper",
-      label: "Peek helper",
-      description: "Check in on a helper subagent by capturing the recent output of its pane. Read-only.",
-      parameters: Type.Object({
-        id: Type.String({ description: "Helper id or name." }),
-        lines: Type.Optional(Type.Integer({ description: "Recent lines to capture (default 60)." })),
-      }),
-      async execute(_id, params, _signal, _onUpdate, ctx) {
-        const e = findHelper(ctx.cwd, params.id);
-        if (!e) return { content: [{ type: "text", text: `No helper matching '${params.id}'.` }], isError: true };
-        const snap = capturePane(e.paneId, params.lines ?? 60);
-        if (snap === null) return { content: [{ type: "text", text: `Pane ${e.paneId} no longer live.` }], isError: true };
-        return { content: [{ type: "text", text: `--- helper ${e.prName} (${e.paneId}) ---\n${snap}` }] };
+      peek: {
+        name: "peek_helper",
+        label: "Peek helper",
+        description: "Check in on a helper subagent by capturing the recent output of its pane. Read-only.",
+        linesDescription: "Recent lines to capture (default 60).",
+        header: (e) => `--- helper ${e.prName} (${e.paneId}) ---`,
+        paneDead: (paneId) => `Pane ${paneId} no longer live.`,
       },
-    });
-
-    pi.registerTool({
-      name: "send_to_helper",
-      label: "Send to helper",
-      description: "Type a message into a helper subagent's session and submit it.",
-      parameters: Type.Object({
-        id: Type.String({ description: "Helper id or name." }),
-        message: Type.String({ description: "Message to send." }),
-      }),
-      async execute(_id, params, _signal, _onUpdate, ctx) {
-        const e = findHelper(ctx.cwd, params.id);
-        if (!e) return { content: [{ type: "text", text: `No helper matching '${params.id}'.` }], isError: true };
-        if (!sendToPane(e.paneId, params.message)) return { content: [{ type: "text", text: `Pane ${e.paneId} no longer live.` }], isError: true };
-        return { content: [{ type: "text", text: `Sent to helper ${e.prName} (${e.paneId}).` }] };
+      send: {
+        name: "send_to_helper",
+        label: "Send to helper",
+        description: "Type a message into a helper subagent's session and submit it.",
+        messageDescription: "Message to send.",
+        success: (e) => `Sent to helper ${e.prName} (${e.paneId}).`,
+        paneDead: (paneId) => `Pane ${paneId} no longer live.`,
       },
-    });
-
-    pi.registerTool({
-      name: "stop_helper",
-      label: "Stop helper",
-      description: "Stop a helper subagent. mode 'interrupt' aborts its current turn (Escape); mode 'kill' closes its pane.",
-      parameters: Type.Object({
-        id: Type.String({ description: "Helper id or name." }),
-        mode: Type.Optional(StringEnum(["interrupt", "kill"] as const, { description: "interrupt (default) or kill." })),
-      }),
-      async execute(_id, params, _signal, _onUpdate, ctx) {
-        const e = findHelper(ctx.cwd, params.id);
-        if (!e) return { content: [{ type: "text", text: `No helper matching '${params.id}'.` }], isError: true };
-        const mode = (params.mode ?? "interrupt") as "interrupt" | "kill";
-        if (!stopPane(e.paneId, mode)) return { content: [{ type: "text", text: `Pane ${e.paneId} no longer live.` }], isError: true };
-        if (mode === "kill") updateEntry(ctx.cwd, e.id, { status: "stopped" });
-        return { content: [{ type: "text", text: `${mode === "kill" ? "Killed" : "Interrupted"} helper ${e.prName} (${e.paneId}).` }] };
+      stop: {
+        name: "stop_helper",
+        label: "Stop helper",
+        description: "Stop a helper subagent. mode 'interrupt' aborts its current turn (Escape); mode 'kill' closes its pane.",
+        paneDead: (paneId) => `Pane ${paneId} no longer live.`,
+        result: (mode, e) => `${mode === "kill" ? "Killed" : "Interrupted"} helper ${e.prName} (${e.paneId}).`,
       },
     });
   }
