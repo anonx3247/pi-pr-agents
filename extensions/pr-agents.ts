@@ -1457,11 +1457,34 @@ let orchestratorPane: string | undefined;
 // The PR-agent pane currently joined into the orchestrator window (docked on
 // the right), or undefined when the orchestrator pane is alone (collapsed).
 let dockedPaneId: string | undefined;
-// This orchestrator's session id, resolved once at depth-0 session_start. Every
-// entry the orchestrator/worker creates is stamped with it, and every depth-0
-// registry read is scoped to it, so concurrent orchestrators sharing one repo
-// only see their own subagents. Subagents inherit it via PI_PR_SESSION.
+// This orchestrator's registry-scope id, derived from the REAL pi session id
+// (ctx.sessionManager.getSessionId()) and RE-RESOLVED on every depth-0
+// session_start, so resuming a pi session (/resume or `pi --session`) re-scopes
+// to the SAME registry entries and automatically re-picks up the subagents it
+// dispatched earlier. Every entry the orchestrator/worker creates is stamped
+// with it, and every depth-0 registry read is scoped to it, so concurrent
+// orchestrators sharing one repo only see their own subagents. Subagents inherit
+// it via PI_PR_SESSION.
 let sessionId: string | undefined;
+
+/**
+ * Resolve the orchestrator's registry-scope id with a strict precedence: the
+ * REAL pi session id (stable across resume) wins; then a PI_PR_SESSION env var
+ * carried over from an earlier resolution; then a freshly minted random id, used
+ * ONLY for ephemeral in-memory sessions that have no session id. Pure (random
+ * source injected via `fallback`) so it can be unit-tested.
+ */
+export function resolveOrchestratorSessionId(opts: {
+  sessionId: string | undefined;
+  env: string | undefined;
+  fallback: () => string;
+}): string {
+  const fromSession = opts.sessionId?.trim();
+  if (fromSession) return fromSession;
+  const fromEnv = opts.env?.trim();
+  if (fromEnv) return fromEnv;
+  return opts.fallback();
+}
 
 /**
  * Choose which agent to (re)dock: the most-recently-created LIVE depth-1 PR
@@ -2130,19 +2153,47 @@ export default function (pi: ExtensionAPI) {
   pi.on("session_start", async (_event, ctx) => {
     if (insideTmux()) tmuxSetup();
 
-    // Depth 0: resolve this orchestrator's session id once and pin it on the
-    // process env so it is stable and inherited by every subagent we dispatch.
-    // Done early (before the widget/poll timers below) so their closures capture
-    // the resolved value.
-    if (level === 0 && !sessionId) {
-      sessionId = process.env.PI_PR_SESSION || randomUUID().slice(0, 8);
+    // Depth 0: (re)resolve this orchestrator's registry-scope id from the REAL
+    // pi session id and pin it on the process env so every subagent we dispatch
+    // inherits it. This runs on EVERY session_start (startup AND resume / new /
+    // fork / reload), NOT just the first — the scope id must follow the active
+    // pi session so resuming re-scopes to the same registry entries. Done early
+    // (before the widget/poll timers below) so their closures see the fresh id.
+    if (level === 0) {
+      const previousSessionId = sessionId;
+      sessionId = resolveOrchestratorSessionId({
+        sessionId: ctx.sessionManager.getSessionId(),
+        env: process.env.PI_PR_SESSION,
+        fallback: () => randomUUID().slice(0, 8),
+      });
       process.env.PI_PR_SESSION = sessionId;
+      // The scope id changed — an in-process session switch. Drop the in-memory
+      // state captured for the PREVIOUS session so it can't bleed into the
+      // resumed one; the orchestrator pane is re-captured and the seeding loops
+      // below re-seed from the resumed session's registry entries.
+      if (previousSessionId !== undefined && previousSessionId !== sessionId) {
+        orchestratorPane = undefined;
+        dockedPaneId = undefined;
+        ghLastState.clear();
+        lastSeenResult.clear();
+        pendingStacks.clear();
+      }
     }
 
-    // Depth 0 inside tmux: capture the orchestrator's OWN pane id once. Every
-    // dock/undock targets this pane and must never break/kill it.
+    // Depth 0 inside tmux: capture the orchestrator's OWN pane id once (or again
+    // after a session switch reset it). Every dock/undock targets this pane and
+    // must never break/kill it.
     if (level === 0 && insideTmux() && !orchestratorPane) {
       orchestratorPane = process.env.TMUX_PANE || tryTmux(["display-message", "-p", "#{pane_id}"]) || undefined;
+    }
+
+    // Depth 0 inside tmux: after (re)resolving the scope id, make sure a live
+    // subagent is docked. On a fresh resume there is no docked pane yet, and the
+    // dock-maintenance tick only RE-docks once the current dock dies — so pick
+    // the most-recently-created live agent from the (resumed) session and dock it.
+    if (level === 0 && insideTmux() && orchestratorPane && !dockedPaneId) {
+      const next = pickRedockAgent(entriesForSession(loadRegistry(ctx.cwd), sessionId), paneAlive);
+      if (next) dockAgent(ctx.cwd, next.paneId);
     }
 
     // The main agent never writes code directly: disable edit/write at depth 0

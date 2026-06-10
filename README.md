@@ -151,6 +151,15 @@ different tools per level, so a helper simply has no way to dispatch.
 The PR registry lives in `<git-common-dir>/pi-pr-agents/registry.json`, shared by
 the main repo and every worktree, so each agent sees the same set of PRs.
 
+Each orchestrator scopes its view of the registry by a session id derived from
+the real pi session id (`ctx.sessionManager.getSessionId()`), exported to
+subagents via `PI_PR_SESSION` so every entry it dispatches is stamped with it.
+Concurrent orchestrators sharing one repo therefore only see their own
+subagents, and resuming a pi session (`/resume` or `pi --session <file>`)
+re-scopes to the same entries and automatically re-picks up the still-live
+subagents it dispatched earlier (widget, gh-polling, finished-notify and
+tmux re-docking all re-seed from the resumed session's entries).
+
 ## Configuration
 
 - **Stacking strategy** — the default used when the orchestrator stacks
