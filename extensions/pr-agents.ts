@@ -268,7 +268,12 @@ export function aliasBlock(kind: ShellKind): string {
       "    if set -q TMUX",
       "        command pi $argv",
       "    else",
-      "        set -l _sess 'pi-'(basename $PWD | tr -c 'A-Za-z0-9_-' '_')",
+      "        set -l _sess",
+      '        if set -q PR_PI_SESSION; and test -n "$PR_PI_SESSION"',
+      "            set _sess $PR_PI_SESSION",
+      "        else",
+      "            set _sess 'pi-'(basename $PWD | tr -c 'A-Za-z0-9_-' '_')'-'(random)",
+      "        end",
       "        command tmux new-session -A -s $_sess (command -v pi) $argv",
       "    end",
       "end",
@@ -285,7 +290,11 @@ export function aliasBlock(kind: ShellKind): string {
     "  else",
     "    local _pi _sess",
     '    _pi="$(command -v pi)"',
-    `    _sess="pi-$(basename "$PWD" | tr -c 'A-Za-z0-9_-' '_')"`,
+    '    if [ -n "$PR_PI_SESSION" ]; then',
+    '      _sess="$PR_PI_SESSION"',
+    "    else",
+    `      _sess="pi-$(basename "$PWD" | tr -c 'A-Za-z0-9_-' '_')-$RANDOM"`,
+    "    fi",
     '    command tmux new-session -A -s "$_sess" "$_pi" "$@"',
     "  fi",
     "}",
@@ -317,7 +326,7 @@ function installTmuxAlias(): InstallResult {
       ok: false,
       shell,
       message:
-        "Could not detect a supported shell (zsh/bash/fish). Add a `pr-pi` wrapper manually that runs `tmux new-session -A -s pi pi`.",
+        'Could not detect a supported shell (zsh/bash/fish). Add a `pr-pi` wrapper manually that runs pi inside a unique tmux session, e.g. `tmux new-session -A -s "pi-$RANDOM" pi` (set PR_PI_SESSION to reattach to a fixed/shared session name).',
     };
   }
   try {
