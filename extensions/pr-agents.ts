@@ -702,11 +702,100 @@ export function buildCleanupNotification(
     const pr = entry.prNumber !== undefined ? `#${entry.prNumber}` : "(no number)";
     return `PR ${pr} '${entry.prName}' (branch ${entry.branch}) was ${state} on GitHub.`;
   });
-  return [
-    ...lines,
-    "",
-    "Run cleanup now: call cleanup_pr_worktrees to remove its worktree, branch, and tmux window.",
-  ].join("\n");
+  const target =
+    transitions.length > 1
+      ? "remove their worktrees, branches, and tmux windows"
+      : "remove its worktree, branch, and tmux window";
+  return [...lines, "", `Run cleanup now: call cleanup_pr_worktrees to ${target}.`].join("\n");
+}
+
+// ---------------------------------------------------------------------------
+// Stack grouping + coalesced-merge buffering (pure helpers)
+//
+// A Graphite stack is merged bottom-up over several seconds, so the 30s GitHub
+// poller surfaces its PRs one at a time across multiple ticks. To emit ONE
+// combined cleanup notification per stack (instead of one per PR), the poller
+// groups registry entries into stacks, buffers terminal transitions that belong
+// to a multi-PR stack, and flushes a stack once its merge wave has settled.
+// The grouping and the settle decision are kept pure (no IO) so they can be
+// unit-tested.
+// ---------------------------------------------------------------------------
+
+/**
+ * Group depth-1 registry entries into stacks. A stack is a maximal chain
+ * connected by the base→branch relationship: entry B is the child of entry A
+ * when `B.base === A.branch`. Each returned array is ordered bottom→top. An
+ * entry whose `base` matches no other entry's `branch` is a stack BOTTOM;
+ * independent PRs (linked to no other entry) are returned as singleton stacks.
+ * Robust to cycles and missing links (never infinite-loops). Stacks are ordered
+ * deterministically by their bottom entry's `createdAt` then `id`.
+ */
+export function groupIntoStacks(entries: readonly PrEntry[]): PrEntry[][] {
+  const depth1 = entries.filter((e) => e.depth === 1);
+  const byBranch = new Map<string, PrEntry>();
+  for (const e of depth1) if (!byBranch.has(e.branch)) byBranch.set(e.branch, e);
+  // The child of A is the (first) entry whose base is A.branch.
+  const childOf = new Map<string, PrEntry>();
+  for (const e of depth1) {
+    const parent = byBranch.get(e.base);
+    if (parent && parent.id !== e.id && !childOf.has(parent.id)) childOf.set(parent.id, e);
+  }
+  // A bottom is an entry whose base does not link to any OTHER entry's branch.
+  const isBottom = (e: PrEntry): boolean => {
+    const parent = byBranch.get(e.base);
+    return !parent || parent.id === e.id;
+  };
+  const stacks: PrEntry[][] = [];
+  for (const bottom of depth1) {
+    if (!isBottom(bottom)) continue;
+    const chain: PrEntry[] = [];
+    const seen = new Set<string>();
+    let cur: PrEntry | undefined = bottom;
+    while (cur && !seen.has(cur.id)) {
+      seen.add(cur.id);
+      chain.push(cur);
+      cur = childOf.get(cur.id);
+    }
+    stacks.push(chain);
+  }
+  return stacks.sort((a, b) => {
+    const [x, y] = [a[0], b[0]];
+    return x.createdAt !== y.createdAt ? x.createdAt.localeCompare(y.createdAt) : x.id.localeCompare(y.id);
+  });
+}
+
+/** A stable id for a stack — the bottom entry's id. */
+export function stackKey(stack: PrEntry[]): string {
+  return stack[0].id;
+}
+
+/**
+ * How long (ms) a buffered stack must see NO new terminal transition before its
+ * coalesced cleanup notification is flushed. Kept below the 30s poll tick so a
+ * stack that sees no new transition on the next tick flushes promptly.
+ */
+export const STACK_SETTLE_MS = 20000;
+
+/** A stack's buffered terminal transitions awaiting a coalesced flush. */
+export interface PendingStack {
+  transitions: { entry: PrEntry; state: "merged" | "closed" }[];
+  updatedAt: number;
+}
+
+/**
+ * Select the keys of buffered stacks that have SETTLED: no new transition has
+ * arrived for at least `settleMs` (i.e. `now - updatedAt >= settleMs`). Pure.
+ */
+export function selectSettledStacks(
+  pending: ReadonlyMap<string, PendingStack>,
+  now: number,
+  settleMs: number,
+): string[] {
+  const out: string[] = [];
+  for (const [key, p] of pending) {
+    if (now - p.updatedAt >= settleMs) out.push(key);
+  }
+  return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -2015,6 +2104,11 @@ export default function (pi: ExtensionAPI) {
   // for an already merged/closed/stopped PR.
   const ghLastState = new Map<string, string>();
 
+  // Orchestrator-only: terminal (merged/closed) transitions belonging to a
+  // multi-PR stack, buffered by stack key until the merge wave settles so a
+  // stack emits ONE coalesced cleanup notification instead of one per PR.
+  const pendingStacks = new Map<string, PendingStack>();
+
   // Orchestrator-only: last-seen resultSeq per PR subagent id, used to detect
   // and dedup newly-finished agents across refresh ticks. Initialized from the
   // registry at startup so pre-existing results never replay a notification
@@ -2140,29 +2234,84 @@ export default function (pi: ExtensionAPI) {
       for (const e of entriesForSession(loadRegistry(ctx.cwd), sessionId)) {
         if (isPollable(e)) ghLastState.set(e.id, "open");
       }
+      const notify = (msg: string) => {
+        if (ctx.isIdle()) pi.sendUserMessage(msg);
+        else pi.sendUserMessage(msg, { deliverAs: "followUp" });
+      };
       const ghTick = () => {
         try {
-          // Classify each pollable PR subagent from a fresh gh read. Entries the
-          // worker has not yet signalled with pr_pushed make zero gh calls.
+          const strategy = loadProjectConfig(ctx.cwd).strategy;
+          // For the graphite strategy, read the whole stack's PR/merge state from
+          // `gt` in ONE shot; per-entry gh reads remain the fallback (and the
+          // only path for github/independent strategies).
+          const gtStates =
+            strategy === "graphite"
+              ? new Map(fetchGraphitePrStates(ctx.cwd).map((i) => [i.prNumber, classifyGraphitePrState(i)]))
+              : undefined;
+
+          // Classify each pollable PR subagent. Entries the worker has not yet
+          // signalled with pr_pushed make zero gh/gt calls.
           const classified: { entry: PrEntry; state: PrStateClass }[] = [];
           for (const e of entriesForSession(loadRegistry(ctx.cwd), sessionId)) {
             if (!isPollable(e)) continue;
-            const json = runGh(["pr", "view", String(e.prNumber), "--json", "state,mergedAt,closedAt,url"], e.worktree);
-            const state = classifyPrState(json);
-            if (state === "unknown") continue; // gh missing/unauth/error — degrade silently
+            let state = gtStates?.get(e.prNumber as number) ?? "unknown";
+            if (state === "unknown") {
+              // No gt data for this PR (absent, or gt unauth/empty) — fall back
+              // to the per-entry gh read so nothing breaks.
+              const json = runGh(
+                ["pr", "view", String(e.prNumber), "--json", "state,mergedAt,closedAt,url"],
+                e.worktree,
+              );
+              state = classifyPrState(json);
+            }
+            if (state === "unknown") continue; // gh/gt missing/unauth/error — degrade silently
             classified.push({ entry: e, state });
           }
           const transitions = selectStateTransitions(classified, ghLastState);
           // Record every fresh state (incl. "open") so the map stays current.
           for (const { entry, state } of classified) ghLastState.set(entry.id, state);
-          if (transitions.length === 0) return;
-          // Persist terminal status so the widget reflects it, then self-notify.
+
+          // Persist terminal status immediately so the widget reflects merged/
+          // closed without waiting for the coalesced flush.
           for (const { entry, state } of transitions) updateEntry(ctx.cwd, entry.id, { status: state });
-          const msg = buildCleanupNotification(transitions);
-          if (ctx.isIdle()) pi.sendUserMessage(msg);
-          else pi.sendUserMessage(msg, { deliverAs: "followUp" });
+
+          // Route notifications: independent (singleton) stacks notify
+          // immediately (batched per tick, as before); multi-PR stacks buffer
+          // until their merge wave settles, then emit ONE combined message.
+          if (transitions.length > 0) {
+            const stacks = groupIntoStacks(loadRegistry(ctx.cwd));
+            const keyOf = new Map<string, string>();
+            const sizeOf = new Map<string, number>();
+            for (const stack of stacks) {
+              const key = stackKey(stack);
+              sizeOf.set(key, stack.length);
+              for (const e of stack) keyOf.set(e.id, key);
+            }
+            const now = Date.now();
+            const singletons: { entry: PrEntry; state: "merged" | "closed" }[] = [];
+            for (const t of transitions) {
+              const key = keyOf.get(t.entry.id);
+              const size = key ? (sizeOf.get(key) ?? 1) : 1;
+              if (!key || size <= 1) {
+                singletons.push(t);
+                continue;
+              }
+              const buf = pendingStacks.get(key) ?? { transitions: [], updatedAt: now };
+              if (!buf.transitions.some((x) => x.entry.id === t.entry.id)) buf.transitions.push(t);
+              buf.updatedAt = now;
+              pendingStacks.set(key, buf);
+            }
+            if (singletons.length > 0) notify(buildCleanupNotification(singletons));
+          }
+
+          // Flush any buffered stacks whose merge wave has settled.
+          for (const key of selectSettledStacks(pendingStacks, Date.now(), STACK_SETTLE_MS)) {
+            const buf = pendingStacks.get(key);
+            pendingStacks.delete(key);
+            if (buf && buf.transitions.length > 0) notify(buildCleanupNotification(buf.transitions));
+          }
         } catch {
-          // Never let a gh/network/notification failure break the poll loop.
+          // Never let a gh/gt/network/notification failure break the poll loop.
         }
       };
       ghTick();
