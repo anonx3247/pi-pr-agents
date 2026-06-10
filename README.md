@@ -160,6 +160,15 @@ re-scopes to the same entries and automatically re-picks up the still-live
 subagents it dispatched earlier (widget, gh-polling, finished-notify and
 tmux re-docking all re-seed from the resumed session's entries).
 
+Resuming also **revives dead subagent panes**. Each subagent records its own pi
+session file (`ctx.sessionManager.getSessionFile()`) on its registry entry, so if
+its tmux pane has since died (e.g. the previous tmux window/session was closed)
+the resumed orchestrator relaunches a background pane that *resumes that exact pi
+session* (`pi --session <file>`) in its still-present worktree, then re-attaches
+it (registry `paneId` update + re-dock). Reviving is limited to depth-1 PR agents
+— depth-2 helper panes are not revived (a revived worker can re-spawn helpers
+itself if it needs them).
+
 ## Configuration
 
 - **Stacking strategy** — the default used when the orchestrator stacks
