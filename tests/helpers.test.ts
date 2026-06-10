@@ -378,12 +378,24 @@ describe("aliasBlock", () => {
     assert.ok(block.includes(END));
   });
 
+  test("fish block opts into PR_PI_SESSION and uses a random suffix by default", () => {
+    const block = aliasBlock("fish");
+    assert.ok(block.includes("PR_PI_SESSION"));
+    assert.ok(block.includes("(random)"));
+  });
+
   for (const kind of ["zsh", "bash"] as const) {
     test(`${kind} block defines a pr-pi() function and markers`, () => {
       const block = aliasBlock(kind);
       assert.ok(block.includes("pr-pi() {"));
       assert.ok(block.includes(BEGIN));
       assert.ok(block.includes(END));
+    });
+
+    test(`${kind} block opts into PR_PI_SESSION and uses a $RANDOM suffix by default`, () => {
+      const block = aliasBlock(kind);
+      assert.ok(block.includes("PR_PI_SESSION"));
+      assert.ok(block.includes("$RANDOM"));
     });
   }
 });
