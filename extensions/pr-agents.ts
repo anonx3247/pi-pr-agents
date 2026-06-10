@@ -2286,17 +2286,15 @@ export default function (pi: ExtensionAPI) {
       try {
         const file = ctx.sessionManager.getSessionFile();
         if (file) {
-          const id =
+          const entries = loadRegistry(ctx.cwd);
+          const own =
             level === 2
-              ? loadRegistry(ctx.cwd).find(
+              ? entries.find(
                   (e) => e.depth === 2 && e.parentId === process.env.PI_PR_ID && e.prName === process.env.PI_PR_HELPER,
-                )?.id
-              : process.env.PI_PR_ID;
-          if (id) {
-            const existing = loadRegistry(ctx.cwd).find((e) => e.id === id);
-            if (existing && existing.workerSessionFile !== file) {
-              updateEntry(ctx.cwd, id, { workerSessionFile: file });
-            }
+                )
+              : entries.find((e) => e.id === process.env.PI_PR_ID);
+          if (own && own.workerSessionFile !== file) {
+            updateEntry(ctx.cwd, own.id, { workerSessionFile: file });
           }
         }
       } catch {
