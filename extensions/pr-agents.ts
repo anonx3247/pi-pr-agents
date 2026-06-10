@@ -710,6 +710,118 @@ export function buildCleanupNotification(
 }
 
 // ---------------------------------------------------------------------------
+// Graphite-native PR-state reader (pure helpers + tolerant IO)
+//
+// Graphite's `gt` CLI caches each stack's PR/merge state in the repo's git
+// common dir: <git-common-dir>/.graphite_pr_info is JSON with a `prInfos` array,
+// one entry per PR in the stack. Field names are NOT documented and vary by gt
+// version, so we parse DEFENSIVELY (multiple likely key spellings) and tolerate
+// every failure. Parsing and classification are kept pure (no IO) so they can be
+// unit-tested; the IO readers degrade to [] / no-op when gt is unavailable.
+//
+// This is a standalone capability: nothing here is wired into the live GitHub
+// poller yet — that wiring lands in a follow-up PR that stacks on this one.
+// ---------------------------------------------------------------------------
+
+/** One PR in a Graphite stack, as read from `.graphite_pr_info`. */
+export interface GraphitePrInfo {
+  prNumber: number;
+  branch: string;
+  state: string;
+  title: string;
+  url: string;
+}
+
+/**
+ * Parse the already-parsed contents of `.graphite_pr_info` into one
+ * {@link GraphitePrInfo} per entry in `prInfos`. Defensive: null/non-object
+ * input → []; missing `prInfos` → []; null/non-object entries are skipped, as
+ * are entries with no resolvable PR number. Field names vary by gt version, so
+ * several likely spellings are tried for the number and branch. The raw `state`
+ * string is preserved verbatim (classification is separate). Pure: no IO.
+ */
+export function parseGraphitePrInfos(json: unknown): GraphitePrInfo[] {
+  if (!json || typeof json !== "object") return [];
+  const prInfos = (json as { prInfos?: unknown }).prInfos;
+  if (!Array.isArray(prInfos)) return [];
+  const out: GraphitePrInfo[] = [];
+  for (const entry of prInfos) {
+    if (!entry || typeof entry !== "object") continue;
+    const o = entry as Record<string, unknown>;
+    const prNumber = numOrUndef(o, "prNumber") ?? numOrUndef(o, "number");
+    if (prNumber === undefined) continue;
+    const branch = str(o, "branchName") || str(o, "headRefName") || str(o, "branch");
+    out.push({
+      prNumber,
+      branch,
+      state: str(o, "state"),
+      title: str(o, "title"),
+      url: str(o, "url"),
+    });
+  }
+  return out;
+}
+
+/**
+ * Classify a Graphite PR state string into a {@link PrStateClass}, mirroring
+ * {@link classifyPrState}: case-insensitive MERGED → "merged", CLOSED →
+ * "closed", OPEN → "open", anything else (including empty) → "unknown".
+ */
+export function classifyGraphitePrState(info: Pick<GraphitePrInfo, "state">): PrStateClass {
+  switch (info.state.toUpperCase()) {
+    case "MERGED":
+      return "merged";
+    case "CLOSED":
+      return "closed";
+    case "OPEN":
+      return "open";
+    default:
+      return "unknown";
+  }
+}
+
+/** Path to Graphite's PR-info cache for this repo. */
+function graphitePrInfoPath(cwd: string): string {
+  return path.join(gitCommonDir(cwd), ".graphite_pr_info");
+}
+
+/**
+ * Read and parse `.graphite_pr_info` for this repo. Tolerant: a missing file or
+ * malformed JSON yields []. IO; not pure.
+ */
+export function readGraphitePrInfos(cwd: string): GraphitePrInfo[] {
+  try {
+    const raw = fs.readFileSync(graphitePrInfoPath(cwd), "utf8");
+    return parseGraphitePrInfos(JSON.parse(raw));
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Best-effort: ask `gt` to refresh its PR-info cache from the Graphite service.
+ * A read-only `gt log short` bumps `.graphite_pr_info`. Swallows ALL errors (gt
+ * missing/unauthenticated/not a gt repo) so callers degrade to stale/no data.
+ * IO; not pure.
+ */
+function refreshGraphitePrInfo(cwd: string): void {
+  try {
+    execFileSync("gt", ["log", "short", "--no-interactive"], { cwd, stdio: "pipe", timeout: 15000 });
+  } catch {
+    /* ignore: gt missing/unauth/not a gt repo */
+  }
+}
+
+/**
+ * Refresh (best-effort) then read the Graphite PR states for this repo. This is
+ * the entry point the GitHub poller will call in the follow-up PR. IO; not pure.
+ */
+export function fetchGraphitePrStates(cwd: string): GraphitePrInfo[] {
+  refreshGraphitePrInfo(cwd);
+  return readGraphitePrInfos(cwd);
+}
+
+// ---------------------------------------------------------------------------
 // Review-comment loop (pure helpers + types)
 //
 // A PR subagent (depth 1) polls its OWN PR for new reviewer feedback and, when
