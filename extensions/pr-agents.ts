@@ -377,6 +377,13 @@ export interface PrEntry {
   prUrl?: string;
   status: "working" | "open" | "merged" | "closed" | "stopped";
   createdAt: string;
+  // The absolute path to this subagent's OWN pi session file, as reported by
+  // `ctx.sessionManager.getSessionFile()` inside the subagent process at its
+  // session_start. Recorded so that, if the subagent's tmux pane later dies
+  // (e.g. the tmux window/session was closed), resuming the orchestrator can
+  // relaunch a pane that RESUMES this exact session in its worktree
+  // (`pi --session <file>`). Undefined for ephemeral (non-persisted) sessions.
+  workerSessionFile?: string;
   // Set by the worker (depth 1) via `pr_pushed` once the branch is pushed AND
   // the PR exists. Only then does the orchestrator start polling this entry's
   // GitHub state — before that the PR may not exist yet, so we make zero gh calls.
@@ -1603,6 +1610,123 @@ function buildHelperCommand(parentId: string, name: string, task: string): strin
   return `${env} pi ${shq(task)} ${flags.join(" ")}; exec ${process.env.SHELL || "bash"}`;
 }
 
+/**
+ * Build the shell command that RESUMES a dead subagent's own pi session in its
+ * worktree, mirroring {@link buildWorkerCommand} / {@link buildHelperCommand}
+ * but with `pi --session <file>` (resume) instead of a fresh task. The SAME
+ * PI_PR_* env the original worker had is reapplied so the resumed process keeps
+ * its identity (depth-1 worker env, or the depth-2 helper env). `; exec $SHELL`
+ * keeps the pane alive after pi exits, like the other launch commands. The
+ * caller guarantees `entry.workerSessionFile` is set.
+ */
+function buildResumeCommand(entry: PrEntry): string {
+  const file = entry.workerSessionFile ?? "";
+  const isHelper = entry.depth === 2;
+  const env = buildEnv(
+    isHelper
+      ? {
+          PI_PR_DEPTH: "2",
+          PI_PR_ID: entry.parentId,
+          PI_PR_HELPER: entry.prName,
+          PI_PR_SESSION: process.env.PI_PR_SESSION ?? "",
+        }
+      : {
+          PI_PR_DEPTH: "1",
+          PI_PR_ID: entry.id,
+          PI_PR_MODE: entry.mode,
+          PI_PR_BASE: entry.base,
+          PI_PR_BRANCH: entry.branch,
+          PI_PR_NAME: entry.prName,
+          PI_PR_SIMPLIFY: entry.simplify ? "1" : "0",
+          PI_PR_SESSION: process.env.PI_PR_SESSION ?? "",
+        },
+  );
+  const flags = ["-a", "--name", shq(isHelper ? `helper: ${entry.prName}` : `PR: ${entry.prName}`)];
+  const prompt = isHelper ? HELPER_PROMPT : WORKER_PROMPT;
+  if (fs.existsSync(prompt)) {
+    flags.push("--append-system-prompt", shq(prompt));
+  }
+  return `${env} pi --session ${shq(file)} ${flags.join(" ")}; exec ${process.env.SHELL || "bash"}`;
+}
+
+/**
+ * Select the subagents that should be REVIVED on orchestrator resume: depth-1 PR
+ * agents that are non-terminal, whose tmux pane is no longer alive, whose
+ * worktree still exists on disk, and whose own pi session file was recorded and
+ * still exists. Helper (depth-2) agents are intentionally excluded — see the
+ * TODO in {@link reviveDeadAgents}. Pure: all liveness/fs facts are injected, so
+ * it is unit-testable without tmux or the filesystem.
+ */
+export function selectRevivableAgents(
+  entries: readonly PrEntry[],
+  checks: {
+    paneAlive: (paneId: string) => boolean;
+    worktreeExists: (dir: string) => boolean;
+    sessionFileExists: (file: string) => boolean;
+  },
+): PrEntry[] {
+  return entries.filter(
+    (e) =>
+      e.depth === 1 &&
+      e.status !== "merged" &&
+      e.status !== "closed" &&
+      e.status !== "stopped" &&
+      !checks.paneAlive(e.paneId) &&
+      Boolean(e.worktree) &&
+      checks.worktreeExists(e.worktree) &&
+      Boolean(e.workerSessionFile) &&
+      checks.sessionFileExists(e.workerSessionFile as string),
+  );
+}
+
+/**
+ * Revive dead subagent panes for the resumed orchestrator session: for each
+ * revivable depth-1 PR agent (see {@link selectRevivableAgents}), relaunch a
+ * background tmux window that RESUMES the subagent's own pi session in its
+ * worktree, then record the NEW pane id so the registry/dock logic re-attaches
+ * it. The existing dock-maintenance / {@link pickRedockAgent} then re-docks one
+ * of the now-live panes. Fully guarded: tmux/fs failures degrade to a no-op so
+ * this is safe to call inside `session_start`, and it is naturally a no-op when
+ * there is nothing to revive.
+ *
+ * TODO: depth-2 helper panes are not revived yet — only their parent depth-1 PR
+ * agents are. A revived worker can re-spawn helpers itself if it needs them.
+ */
+export function reviveDeadAgents(cwd: string, scopeId: string | undefined): void {
+  try {
+    if (!insideTmux()) return;
+    const entries = entriesForSession(loadRegistry(cwd), scopeId);
+    const revivable = selectRevivableAgents(entries, {
+      paneAlive,
+      worktreeExists: (dir) => {
+        try {
+          return fs.existsSync(dir);
+        } catch {
+          return false;
+        }
+      },
+      sessionFileExists: (file) => {
+        try {
+          return fs.existsSync(file);
+        } catch {
+          return false;
+        }
+      },
+    });
+    for (const entry of revivable) {
+      try {
+        const command = buildResumeCommand(entry);
+        const paneId = openWindow(entry.worktree, command, paneTitle(entry), windowName(entry));
+        updateEntry(cwd, entry.id, { paneId });
+      } catch {
+        // Reviving one agent must never block the others or throw.
+      }
+    }
+  } catch {
+    // Never let revival throw out of session_start.
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Worktree helpers
 // ---------------------------------------------------------------------------
@@ -2153,6 +2277,31 @@ export default function (pi: ExtensionAPI) {
   pi.on("session_start", async (_event, ctx) => {
     if (insideTmux()) tmuxSetup();
 
+    // Depth 1 (PR subagent) or depth 2 (helper): record this process's OWN pi
+    // session file onto its registry entry so the orchestrator can later RESUME
+    // it (pi --session <file>) when reviving a dead pane. Null-safe: ephemeral
+    // (non-persisted) sessions return undefined, so we skip. Only writes when the
+    // path is new, to avoid pointless registry churn on every turn.
+    if (level === 1 || level === 2) {
+      try {
+        const file = ctx.sessionManager.getSessionFile();
+        if (file) {
+          const entries = loadRegistry(ctx.cwd);
+          const own =
+            level === 2
+              ? entries.find(
+                  (e) => e.depth === 2 && e.parentId === process.env.PI_PR_ID && e.prName === process.env.PI_PR_HELPER,
+                )
+              : entries.find((e) => e.id === process.env.PI_PR_ID);
+          if (own && own.workerSessionFile !== file) {
+            updateEntry(ctx.cwd, own.id, { workerSessionFile: file });
+          }
+        }
+      } catch {
+        // Recording the session file is best-effort; never break session_start.
+      }
+    }
+
     // Depth 0: (re)resolve this orchestrator's registry-scope id from the REAL
     // pi session id and pin it on the process env so every subagent we dispatch
     // inherits it. This runs on EVERY session_start (startup AND resume / new /
@@ -2185,6 +2334,15 @@ export default function (pi: ExtensionAPI) {
     // must never break/kill it.
     if (level === 0 && insideTmux() && !orchestratorPane) {
       orchestratorPane = process.env.TMUX_PANE || tryTmux(["display-message", "-p", "#{pane_id}"]) || undefined;
+    }
+
+    // Depth 0 inside tmux: revive any subagent whose tmux pane has DIED (e.g.
+    // the previous tmux window/session was closed) by relaunching a pane that
+    // RESUMES the subagent's own pi session in its still-present worktree. Runs
+    // BEFORE the re-dock block below so a revived (now-live) pane is eligible to
+    // be docked. Fully guarded — a no-op when there is nothing to revive.
+    if (level === 0 && insideTmux()) {
+      reviveDeadAgents(ctx.cwd, sessionId);
     }
 
     // Depth 0 inside tmux: after (re)resolving the scope id, make sure a live

@@ -28,6 +28,7 @@ import {
   saveProjectConfig,
   saveRegistry,
   selectNewlyFinished,
+  selectRevivableAgents,
   selectStateTransitions,
   shq,
   slugify,
@@ -244,6 +245,63 @@ describe("pickRedockAgent", () => {
       pickRedockAgent([], () => true),
       undefined,
     );
+  });
+});
+
+describe("selectRevivableAgents", () => {
+  const mk = (id: string, over: Partial<PrEntry> = {}): PrEntry =>
+    ({
+      id,
+      prName: id,
+      branch: id,
+      base: "main",
+      mode: "independent",
+      paneId: `%${id}`,
+      worktree: `/wt/${id}`,
+      depth: 1,
+      parentId: "root",
+      status: "working",
+      createdAt: "2026-01-01T00:00:00Z",
+      workerSessionFile: `/sessions/${id}.jsonl`,
+      ...over,
+    }) as PrEntry;
+
+  const checks = {
+    paneAlive: () => false,
+    worktreeExists: () => true,
+    sessionFileExists: () => true,
+  };
+
+  test("includes a non-terminal depth-1 agent with a dead pane, present worktree + session file", () => {
+    assert.deepEqual(
+      selectRevivableAgents([mk("a")], checks).map((e) => e.id),
+      ["a"],
+    );
+  });
+
+  test("excludes terminal agents (merged/closed/stopped)", () => {
+    const entries = [mk("m", { status: "merged" }), mk("c", { status: "closed" }), mk("s", { status: "stopped" })];
+    assert.deepEqual(selectRevivableAgents(entries, checks), []);
+  });
+
+  test("excludes agents whose pane is still alive", () => {
+    assert.deepEqual(selectRevivableAgents([mk("a")], { ...checks, paneAlive: () => true }), []);
+  });
+
+  test("excludes agents whose worktree no longer exists", () => {
+    assert.deepEqual(selectRevivableAgents([mk("a")], { ...checks, worktreeExists: () => false }), []);
+  });
+
+  test("excludes agents with no recorded session file", () => {
+    assert.deepEqual(selectRevivableAgents([mk("a", { workerSessionFile: undefined })], checks), []);
+  });
+
+  test("excludes agents whose session file no longer exists on disk", () => {
+    assert.deepEqual(selectRevivableAgents([mk("a")], { ...checks, sessionFileExists: () => false }), []);
+  });
+
+  test("excludes depth-2 helper entries", () => {
+    assert.deepEqual(selectRevivableAgents([mk("h", { depth: 2 })], checks), []);
   });
 });
 
