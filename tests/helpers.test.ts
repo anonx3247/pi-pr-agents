@@ -14,6 +14,7 @@ import {
   capTail,
   classifyPrState,
   detectShell,
+  entriesForSession,
   extractFinalResult,
   findEntry,
   isPollable,
@@ -788,6 +789,54 @@ describe("registry round-trip", () => {
 
   test("loadRegistry returns [] when no registry file exists", () => {
     assert.deepEqual(loadRegistry(dir), []);
+  });
+});
+
+describe("entriesForSession", () => {
+  function entry(id: string, sessionId?: string): PrEntry {
+    return {
+      id,
+      sessionId,
+      prName: `pr ${id}`,
+      branch: `pi/${id}`,
+      base: "main",
+      mode: "independent",
+      paneId: "%1",
+      worktree: "/tmp",
+      depth: 1,
+      parentId: "root",
+      status: "working",
+      createdAt: "2026-01-01T00:00:00.000Z",
+    };
+  }
+
+  test("returns only entries whose sessionId matches", () => {
+    const entries = [entry("a", "s1"), entry("b", "s2"), entry("c", "s1")];
+    assert.deepEqual(
+      entriesForSession(entries, "s1").map((e) => e.id),
+      ["a", "c"],
+    );
+  });
+
+  test("returns [] when no entry matches the session", () => {
+    const entries = [entry("a", "s1"), entry("b", "s2")];
+    assert.deepEqual(entriesForSession(entries, "other"), []);
+  });
+
+  test("an undefined sessionId selects only legacy untagged entries", () => {
+    const entries = [entry("a", "s1"), entry("legacy")];
+    assert.deepEqual(
+      entriesForSession(entries, undefined).map((e) => e.id),
+      ["legacy"],
+    );
+  });
+
+  test("does not mutate the input array", () => {
+    const entries = [entry("a", "s1"), entry("b", "s2")];
+    const snapshot = [...entries];
+    entriesForSession(entries, "s1");
+    assert.deepEqual(entries, snapshot);
+    assert.equal(entries.length, 2);
   });
 });
 

@@ -350,6 +350,11 @@ function installTmuxAlias(): InstallResult {
 
 export interface PrEntry {
   id: string;
+  // The id of the orchestrator (depth-0) session that owns this entry.
+  // Subagents inherit it via the PI_PR_SESSION env var so each orchestrator
+  // only sees the subagents it dispatched (multiple orchestrators can share one
+  // repo / registry file).
+  sessionId?: string;
   prName: string;
   branch: string;
   base: string;
@@ -410,6 +415,15 @@ export function updateEntry(cwd: string, id: string, patch: Partial<PrEntry>): P
   entries[idx] = { ...entries[idx], ...patch };
   saveRegistry(cwd, entries);
   return entries[idx];
+}
+
+/**
+ * Return only the entries owned by the given orchestrator session. When
+ * `sessionId` is undefined this naturally returns only legacy untagged entries
+ * (an acceptable fallback for registries written before session scoping).
+ */
+export function entriesForSession(entries: readonly PrEntry[], sessionId: string | undefined): PrEntry[] {
+  return entries.filter((e) => e.sessionId === sessionId);
 }
 
 export function findEntry(entries: PrEntry[], ref: string): PrEntry | undefined {
@@ -1233,6 +1247,11 @@ let orchestratorPane: string | undefined;
 // The PR-agent pane currently joined into the orchestrator window (docked on
 // the right), or undefined when the orchestrator pane is alone (collapsed).
 let dockedPaneId: string | undefined;
+// This orchestrator's session id, resolved once at depth-0 session_start. Every
+// entry the orchestrator/worker creates is stamped with it, and every depth-0
+// registry read is scoped to it, so concurrent orchestrators sharing one repo
+// only see their own subagents. Subagents inherit it via PI_PR_SESSION.
+let sessionId: string | undefined;
 
 /**
  * Choose which agent to (re)dock: the most-recently-created LIVE depth-1 PR
@@ -1316,6 +1335,10 @@ function buildWorkerCommand(entry: PrEntry, task: string): string {
     PI_PR_BRANCH: entry.branch,
     PI_PR_NAME: entry.prName,
     PI_PR_SIMPLIFY: entry.simplify ? "1" : "0",
+    // Carry the orchestrator's session id so the worker (and its helpers) tag
+    // their entries with it; the orchestrator set process.env.PI_PR_SESSION at
+    // depth-0 session_start.
+    PI_PR_SESSION: process.env.PI_PR_SESSION ?? "",
   });
   const flags = [
     // Trust project-local files for this run (dispatched worktree of a repo the
@@ -1337,6 +1360,8 @@ function buildHelperCommand(parentId: string, name: string, task: string): strin
     PI_PR_DEPTH: "2",
     PI_PR_ID: parentId,
     PI_PR_HELPER: name,
+    // Inherit the orchestrator's session id so helper entries are scoped too.
+    PI_PR_SESSION: process.env.PI_PR_SESSION ?? "",
   });
   const flags = ["-a", "--name", shq(`helper: ${name}`)];
   if (fs.existsSync(HELPER_PROMPT)) {
@@ -1433,10 +1458,15 @@ function prState(cwd: string, number: number): string | null {
   }
 }
 
-function runCleanup(cwd: string, dryRun: boolean): CleanupResult {
+function runCleanup(cwd: string, dryRun: boolean, sessionId: string | undefined): CleanupResult {
   const root = repoRoot(cwd);
   const base = defaultBranch(cwd);
+  // The FULL registry (all sessions) — used only as the orphan-prune guard so
+  // we never delete a concurrent session's worktree. Reaping is scoped to THIS
+  // session's entries; other sessions' rows are preserved on save.
   const entries = loadRegistry(cwd);
+  const sessionEntries = entriesForSession(entries, sessionId);
+  const otherSessionEntries = entries.filter((e) => e.sessionId !== sessionId);
   const removed: string[] = [];
   const kept: string[] = [];
   const lines: string[] = [];
@@ -1444,7 +1474,7 @@ function runCleanup(cwd: string, dryRun: boolean): CleanupResult {
 
   // 1. Registry-tracked PR agents whose PR is merged/closed or branch merged.
   const removedParents = new Set<string>();
-  for (const e of entries) {
+  for (const e of sessionEntries) {
     if (e.depth > 1) {
       survivors.push(e); // helpers handled in step 1b
       continue;
@@ -1493,6 +1523,8 @@ function runCleanup(cwd: string, dryRun: boolean): CleanupResult {
     // nested layout (`<root>/.worktrees/`), since both contain `.worktrees/`.
     if (!wt.includes(`.worktrees${path.sep}`) && !wt.includes(".worktrees/")) continue;
     if (survivors.some((s) => s.worktree === wt)) continue;
+    // Guard against the FULL registry (every session) so we never prune a
+    // worktree another concurrent orchestrator still tracks.
     if (entries.some((e) => e.worktree === wt)) continue; // handled above
     if (!fs.existsSync(wt)) continue;
     lines.push(`${dryRun ? "would prune" : "pruning"} orphan worktree ${wt}`);
@@ -1502,7 +1534,8 @@ function runCleanup(cwd: string, dryRun: boolean): CleanupResult {
 
   if (!dryRun) {
     tryGit(["worktree", "prune"], root);
-    saveRegistry(cwd, survivors);
+    // Preserve OTHER sessions' rows; only this session's survivors are rewritten.
+    saveRegistry(cwd, [...otherSessionEntries, ...survivors]);
   }
 
   return { removed, kept, lines };
@@ -1803,8 +1836,13 @@ interface WidgetTheme {
  * there are no PR agents (so the caller clears the widget). Reads live pane and
  * git state; everything degrades gracefully if tmux/git calls fail.
  */
-function renderPrWidget(cwd: string, theme: WidgetTheme, width: number): string[] | undefined {
-  const entries = loadRegistry(cwd).filter((e) => e.depth === 1);
+function renderPrWidget(
+  cwd: string,
+  theme: WidgetTheme,
+  width: number,
+  sessionId: string | undefined,
+): string[] | undefined {
+  const entries = entriesForSession(loadRegistry(cwd), sessionId).filter((e) => e.depth === 1);
   if (entries.length === 0) return undefined;
 
   const cap = Math.max(20, width - 1);
@@ -1877,6 +1915,15 @@ export default function (pi: ExtensionAPI) {
   pi.on("session_start", async (_event, ctx) => {
     if (insideTmux()) tmuxSetup();
 
+    // Depth 0: resolve this orchestrator's session id once and pin it on the
+    // process env so it is stable and inherited by every subagent we dispatch.
+    // Done early (before the widget/poll timers below) so their closures capture
+    // the resolved value.
+    if (level === 0 && !sessionId) {
+      sessionId = process.env.PI_PR_SESSION || randomUUID().slice(0, 8);
+      process.env.PI_PR_SESSION = sessionId;
+    }
+
     // Depth 0 inside tmux: capture the orchestrator's OWN pane id once. Every
     // dock/undock targets this pane and must never break/kill it.
     if (level === 0 && insideTmux() && !orchestratorPane) {
@@ -1918,13 +1965,13 @@ export default function (pi: ExtensionAPI) {
     if (level === 0 && ctx.hasUI && !widgetTimer) {
       // Seed last-seen from the current registry so existing results don't
       // replay as notifications the moment the orchestrator starts.
-      for (const e of loadRegistry(ctx.cwd)) {
+      for (const e of entriesForSession(loadRegistry(ctx.cwd), sessionId)) {
         if (e.depth === 1 && typeof e.resultSeq === "number") lastSeenResult.set(e.id, e.resultSeq);
       }
       const tick = () => {
         try {
           const width = process.stdout.columns ?? 100;
-          const lines = renderPrWidget(ctx.cwd, ctx.ui.theme, width);
+          const lines = renderPrWidget(ctx.cwd, ctx.ui.theme, width, sessionId);
           ctx.ui.setWidget(WIDGET_KEY, lines);
         } catch {
           // tmux/git failures already degrade to null inside renderPrWidget;
@@ -1934,7 +1981,7 @@ export default function (pi: ExtensionAPI) {
         // recently created live agent, or collapse to the orchestrator alone.
         try {
           if (insideTmux() && orchestratorPane && dockedPaneId && !paneAlive(dockedPaneId)) {
-            const next = pickRedockAgent(loadRegistry(ctx.cwd), paneAlive);
+            const next = pickRedockAgent(entriesForSession(loadRegistry(ctx.cwd), sessionId), paneAlive);
             if (next) dockAgent(ctx.cwd, next.paneId);
             else dockedPaneId = undefined;
           }
@@ -1945,7 +1992,7 @@ export default function (pi: ExtensionAPI) {
         // subagent finishes a turn. The seq + last-seen map dedups; isIdle
         // picks immediate vs. follow-up delivery so we never clobber a turn.
         try {
-          const fresh = selectNewlyFinished(loadRegistry(ctx.cwd), lastSeenResult);
+          const fresh = selectNewlyFinished(entriesForSession(loadRegistry(ctx.cwd), sessionId), lastSeenResult);
           if (fresh.length > 0) {
             for (const { entry, seq } of fresh) lastSeenResult.set(entry.id, seq);
             const msg = buildFinishedNotification(fresh.map((f) => f.entry));
@@ -1969,7 +2016,7 @@ export default function (pi: ExtensionAPI) {
       // trigger a gh call or a replayed cleanup prompt; pollable entries start
       // as "open" and are re-classified on the first tick (so a PR that merged
       // while the orchestrator was down still surfaces as a fresh transition).
-      for (const e of loadRegistry(ctx.cwd)) {
+      for (const e of entriesForSession(loadRegistry(ctx.cwd), sessionId)) {
         if (isPollable(e)) ghLastState.set(e.id, "open");
       }
       const ghTick = () => {
@@ -1977,7 +2024,7 @@ export default function (pi: ExtensionAPI) {
           // Classify each pollable PR subagent from a fresh gh read. Entries the
           // worker has not yet signalled with pr_pushed make zero gh calls.
           const classified: { entry: PrEntry; state: PrStateClass }[] = [];
-          for (const e of loadRegistry(ctx.cwd)) {
+          for (const e of entriesForSession(loadRegistry(ctx.cwd), sessionId)) {
             if (!isPollable(e)) continue;
             const json = runGh(["pr", "view", String(e.prNumber), "--json", "state,mergedAt,closedAt,url"], e.worktree);
             const state = classifyPrState(json);
@@ -2259,7 +2306,7 @@ export default function (pi: ExtensionAPI) {
         if ((mode === "stack" || mode === "graphite") && !params.base) {
           const stackRef = params.stack_on
             ? findEntry(entries, params.stack_on)
-            : [...entries].reverse().find((e) => e.depth === 1);
+            : [...entriesForSession(entries, sessionId)].reverse().find((e) => e.depth === 1);
           if (stackRef) base = stackRef.branch;
         }
 
@@ -2283,6 +2330,7 @@ export default function (pi: ExtensionAPI) {
         const id = randomUUID().slice(0, 8);
         const entry: PrEntry = {
           id,
+          sessionId: sessionId ?? process.env.PI_PR_SESSION,
           prName: params.pr_name,
           branch,
           base,
@@ -2360,7 +2408,7 @@ export default function (pi: ExtensionAPI) {
     registerPaneControlTools(pi, {
       noun: "PR agent",
       idDescription: "PR id, branch, name, or #number.",
-      resolve: (cwd, ref) => findEntry(loadRegistry(cwd), ref),
+      resolve: (cwd, ref) => findEntry(entriesForSession(loadRegistry(cwd), sessionId), ref),
       list: {
         name: "list_pr_agents",
         label: "List PR agents",
@@ -2368,7 +2416,7 @@ export default function (pi: ExtensionAPI) {
           "List every dispatched PR subagent with its PR number/name, branch, mode, tmux pane and live status.",
         promptGuidelines: ["Use list_pr_agents to review the current set of in-flight PRs before dispatching more."],
         empty: "No PR agents dispatched yet.",
-        entries: (cwd) => loadRegistry(cwd).filter((e) => e.depth === 1),
+        entries: (cwd) => entriesForSession(loadRegistry(cwd), sessionId).filter((e) => e.depth === 1),
         row: (e) => {
           const alive = paneAlive(e.paneId) ? "live" : "ended";
           const pr = e.prNumber !== undefined ? `#${e.prNumber}` : "(no PR yet)";
@@ -2423,18 +2471,23 @@ export default function (pi: ExtensionAPI) {
         id: Type.String({ description: "PR id, branch, name, or #number." }),
       }),
       async execute(_id, params, _signal, _onUpdate, ctx) {
-        return withEntry(findEntry(loadRegistry(ctx.cwd), params.id), "PR agent", params.id, (entry) => {
-          tryTmux(["select-window", "-t", entry.paneId]);
-          const ok = tryTmux(["select-pane", "-t", entry.paneId]);
-          return {
-            content: [
-              {
-                type: "text",
-                text: ok === null ? "Pane no longer exists." : `Focused ${entry.prName} (${entry.paneId}).`,
-              },
-            ],
-          };
-        });
+        return withEntry(
+          findEntry(entriesForSession(loadRegistry(ctx.cwd), sessionId), params.id),
+          "PR agent",
+          params.id,
+          (entry) => {
+            tryTmux(["select-window", "-t", entry.paneId]);
+            const ok = tryTmux(["select-pane", "-t", entry.paneId]);
+            return {
+              content: [
+                {
+                  type: "text",
+                  text: ok === null ? "Pane no longer exists." : `Focused ${entry.prName} (${entry.paneId}).`,
+                },
+              ],
+            };
+          },
+        );
       },
     });
 
@@ -2445,7 +2498,7 @@ export default function (pi: ExtensionAPI) {
         "Remove worktrees, branches and panes for PRs that are now merged or closed, plus prune orphaned worktrees. Pass dry_run to preview.",
       parameters: Type.Object({ dry_run: Type.Optional(Type.Boolean()) }),
       async execute(_id, params, _signal, _onUpdate, ctx) {
-        const res = runCleanup(ctx.cwd, params.dry_run ?? false);
+        const res = runCleanup(ctx.cwd, params.dry_run ?? false, sessionId);
         const body = res.lines.length ? res.lines.join("\n") : "Nothing to clean up.";
         const tail = res.kept.length ? `\n\nStill active:\n  ${res.kept.join("\n  ")}` : "";
         return { content: [{ type: "text", text: body + tail }], details: res };
@@ -2456,7 +2509,7 @@ export default function (pi: ExtensionAPI) {
       description: "Clean up worktrees/branches/panes for merged or closed PRs",
       handler: async (args, ctx) => {
         const dry = /\bdry\b|--dry/.test(args ?? "");
-        const res = runCleanup(ctx.cwd, dry);
+        const res = runCleanup(ctx.cwd, dry, sessionId);
         const msg = res.lines.length ? res.lines.join("\n") : "Nothing to clean up.";
         ctx.ui.notify(dry ? `[dry run]\n${msg}` : msg, "info");
       },
@@ -2473,7 +2526,7 @@ export default function (pi: ExtensionAPI) {
           ctx.ui.notify("Docking a PR agent requires running pi inside tmux.", "info");
           return;
         }
-        const items = buildAgentPickerItems(loadRegistry(ctx.cwd), {
+        const items = buildAgentPickerItems(entriesForSession(loadRegistry(ctx.cwd), sessionId), {
           isAlive: paneAlive,
           // Match the widget: scan a wide tail so the activity line is detected.
           isWorking: (paneId) => isWorkingSnapshot(capturePane(paneId, 40)),
@@ -2748,6 +2801,7 @@ export default function (pi: ExtensionAPI) {
         const hid = randomUUID().slice(0, 8);
         const entry: PrEntry = {
           id: hid,
+          sessionId: process.env.PI_PR_SESSION,
           prName: params.name,
           branch: "",
           base: "",
