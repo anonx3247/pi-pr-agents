@@ -710,6 +710,95 @@ export function buildCleanupNotification(
 }
 
 // ---------------------------------------------------------------------------
+// Stack grouping + coalesced-merge buffering (pure helpers)
+//
+// A Graphite stack is merged bottom-up over several seconds, so the 30s GitHub
+// poller surfaces its PRs one at a time across multiple ticks. To emit ONE
+// combined cleanup notification per stack (instead of one per PR), the poller
+// groups registry entries into stacks, buffers terminal transitions that belong
+// to a multi-PR stack, and flushes a stack once its merge wave has settled.
+// The grouping and the settle decision are kept pure (no IO) so they can be
+// unit-tested.
+// ---------------------------------------------------------------------------
+
+/**
+ * Group depth-1 registry entries into stacks. A stack is a maximal chain
+ * connected by the base→branch relationship: entry B is the child of entry A
+ * when `B.base === A.branch`. Each returned array is ordered bottom→top. An
+ * entry whose `base` matches no other entry's `branch` is a stack BOTTOM;
+ * independent PRs (linked to no other entry) are returned as singleton stacks.
+ * Robust to cycles and missing links (never infinite-loops). Stacks are ordered
+ * deterministically by their bottom entry's `createdAt` then `id`.
+ */
+export function groupIntoStacks(entries: readonly PrEntry[]): PrEntry[][] {
+  const depth1 = entries.filter((e) => e.depth === 1);
+  const byBranch = new Map<string, PrEntry>();
+  for (const e of depth1) if (!byBranch.has(e.branch)) byBranch.set(e.branch, e);
+  // The child of A is the (first) entry whose base is A.branch.
+  const childOf = new Map<string, PrEntry>();
+  for (const e of depth1) {
+    const parent = byBranch.get(e.base);
+    if (parent && parent.id !== e.id && !childOf.has(parent.id)) childOf.set(parent.id, e);
+  }
+  // A bottom is an entry whose base does not link to any OTHER entry's branch.
+  const isBottom = (e: PrEntry): boolean => {
+    const parent = byBranch.get(e.base);
+    return !parent || parent.id === e.id;
+  };
+  const stacks: PrEntry[][] = [];
+  for (const bottom of depth1) {
+    if (!isBottom(bottom)) continue;
+    const chain: PrEntry[] = [];
+    const seen = new Set<string>();
+    let cur: PrEntry | undefined = bottom;
+    while (cur && !seen.has(cur.id)) {
+      seen.add(cur.id);
+      chain.push(cur);
+      cur = childOf.get(cur.id);
+    }
+    stacks.push(chain);
+  }
+  return stacks.sort((a, b) => {
+    const [x, y] = [a[0], b[0]];
+    return x.createdAt !== y.createdAt ? x.createdAt.localeCompare(y.createdAt) : x.id.localeCompare(y.id);
+  });
+}
+
+/** A stable id for a stack — the bottom entry's id. */
+export function stackKey(stack: PrEntry[]): string {
+  return stack[0].id;
+}
+
+/**
+ * How long (ms) a buffered stack must see NO new terminal transition before its
+ * coalesced cleanup notification is flushed. Kept below the 30s poll tick so a
+ * stack that sees no new transition on the next tick flushes promptly.
+ */
+export const STACK_SETTLE_MS = 20000;
+
+/** A stack's buffered terminal transitions awaiting a coalesced flush. */
+export interface PendingStack {
+  transitions: { entry: PrEntry; state: "merged" | "closed" }[];
+  updatedAt: number;
+}
+
+/**
+ * Select the keys of buffered stacks that have SETTLED: no new transition has
+ * arrived for at least `settleMs` (i.e. `now - updatedAt >= settleMs`). Pure.
+ */
+export function selectSettledStacks(
+  pending: ReadonlyMap<string, PendingStack>,
+  now: number,
+  settleMs: number,
+): string[] {
+  const out: string[] = [];
+  for (const [key, p] of pending) {
+    if (now - p.updatedAt >= settleMs) out.push(key);
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------------------
 // Graphite-native PR-state reader (pure helpers + tolerant IO)
 //
 // Graphite's `gt` CLI caches each stack's PR/merge state in the repo's git
