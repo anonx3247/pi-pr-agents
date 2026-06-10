@@ -92,6 +92,11 @@ It writes an idempotent, marker-delimited block to `~/.zshrc`, `~/.bashrc`, or
 `~/.config/fish/functions/pr-pi.fish` depending on your shell. Set
 `PI_PR_NO_ALIAS_PROMPT=1` to suppress the offer.
 
+By default each `pr-pi` run gets its own unique tmux session (a random suffix is
+appended to the session name) so concurrent orchestrators stay isolated. Set the
+`PR_PI_SESSION` environment variable to use a fixed session name instead — handy
+when you want to reattach to or share a named session on purpose.
+
 ## Install
 
 ```bash
