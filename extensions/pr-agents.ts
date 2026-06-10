@@ -702,11 +702,11 @@ export function buildCleanupNotification(
     const pr = entry.prNumber !== undefined ? `#${entry.prNumber}` : "(no number)";
     return `PR ${pr} '${entry.prName}' (branch ${entry.branch}) was ${state} on GitHub.`;
   });
-  return [
-    ...lines,
-    "",
-    "Run cleanup now: call cleanup_pr_worktrees to remove its worktree, branch, and tmux window.",
-  ].join("\n");
+  const target =
+    transitions.length > 1
+      ? "remove their worktrees, branches, and tmux windows"
+      : "remove its worktree, branch, and tmux window";
+  return [...lines, "", `Run cleanup now: call cleanup_pr_worktrees to ${target}.`].join("\n");
 }
 
 // ---------------------------------------------------------------------------

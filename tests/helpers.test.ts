@@ -722,6 +722,8 @@ describe("buildCleanupNotification", () => {
     ]);
     assert.ok(msg.includes("PR #1 'pr a' (branch pi/a) was merged on GitHub."));
     assert.ok(msg.includes("PR #2 'pr b' (branch pi/b) was closed on GitHub."));
+    // Plural cleanup wording for a coalesced multi-PR (stack) notification.
+    assert.ok(msg.includes("remove their worktrees, branches, and tmux windows"));
   });
 
   test("uses a placeholder when the PR number is missing", () => {
