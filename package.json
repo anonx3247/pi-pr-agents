@@ -1,6 +1,6 @@
 {
   "name": "pi-pr-agents",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Graphite/PR-stack orchestration for pi: a main agent that splits work into PRs, dispatches a dedicated worktree subagent per PR, and lays them out as labelled tmux panes.",
   "author": "anonx3247",
   "license": "MIT",
