@@ -24,6 +24,7 @@ import {
   paneTitle,
   pickRedockAgent,
   projectConfigPath,
+  resolveOrchestratorSessionId,
   saveProjectConfig,
   saveRegistry,
   selectNewlyFinished,
@@ -851,6 +852,30 @@ describe("entriesForSession", () => {
     entriesForSession(entries, "s1");
     assert.deepEqual(entries, snapshot);
     assert.equal(entries.length, 2);
+  });
+});
+
+describe("resolveOrchestratorSessionId", () => {
+  const fallback = () => "RANDOM";
+
+  test("prefers the real pi session id over env and fallback", () => {
+    assert.equal(resolveOrchestratorSessionId({ sessionId: "pi-sess", env: "env-sess", fallback }), "pi-sess");
+  });
+
+  test("falls back to PI_PR_SESSION env when there is no session id", () => {
+    assert.equal(resolveOrchestratorSessionId({ sessionId: undefined, env: "env-sess", fallback }), "env-sess");
+    assert.equal(resolveOrchestratorSessionId({ sessionId: "", env: "env-sess", fallback }), "env-sess");
+    assert.equal(resolveOrchestratorSessionId({ sessionId: "   ", env: "env-sess", fallback }), "env-sess");
+  });
+
+  test("falls back to the random id only when neither session id nor env is set", () => {
+    assert.equal(resolveOrchestratorSessionId({ sessionId: undefined, env: undefined, fallback }), "RANDOM");
+    assert.equal(resolveOrchestratorSessionId({ sessionId: "", env: "  ", fallback }), "RANDOM");
+  });
+
+  test("trims whitespace around the resolved id", () => {
+    assert.equal(resolveOrchestratorSessionId({ sessionId: "  pi-sess  ", env: undefined, fallback }), "pi-sess");
+    assert.equal(resolveOrchestratorSessionId({ sessionId: undefined, env: "  env-sess  ", fallback }), "env-sess");
   });
 });
 
