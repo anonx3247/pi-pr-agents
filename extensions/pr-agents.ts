@@ -2123,6 +2123,44 @@ export function statusMarker(status: PrEntry["status"], alive: boolean, working:
 }
 
 /**
+ * Display priority bucket for one PR agent (lower sorts higher). Actively
+ * working agents come first (0), then live-but-idle agents (1), then
+ * terminal/stopped ones — merged/closed or dead panes — sink to the bottom (2).
+ * This keeps the freshest, most relevant work visible at the top of a long
+ * (truncated) list while pushing stopped/idle agents down. Pure for testing.
+ */
+export function displayBucket(status: PrEntry["status"], alive: boolean, working: boolean): number {
+  if (status === "merged" || status === "closed" || !alive) return 2;
+  if (working) return 0;
+  return 1;
+}
+
+/**
+ * Order PR agents for the list widget: by display bucket (working → idle →
+ * stopped) and, within a bucket, newest-first by `createdAt` (ties broken by
+ * id). So newer agents bubble up and stopped/idle agents sink, ensuring recent
+ * work stays visible when the widget truncates. Liveness/working facts are
+ * injected so this stays pure and unit-testable. Does not mutate `entries`.
+ */
+export function sortPrEntriesForDisplay(
+  entries: readonly PrEntry[],
+  opts: { isAlive: (paneId: string) => boolean; isWorking: (paneId: string) => boolean },
+): PrEntry[] {
+  return [...entries]
+    .map((e) => {
+      const alive = opts.isAlive(e.paneId);
+      const working = alive && opts.isWorking(e.paneId);
+      return { e, bucket: displayBucket(e.status, alive, working) };
+    })
+    .sort((a, b) =>
+      a.bucket !== b.bucket
+        ? a.bucket - b.bucket
+        : b.e.createdAt.localeCompare(a.e.createdAt) || b.e.id.localeCompare(a.e.id),
+    )
+    .map((x) => x.e);
+}
+
+/**
  * One selectable row in the "dock a PR agent" picker overlay. Built purely from
  * a registry snapshot + injected liveness/working/docked info so it can be
  * unit-tested without tmux. `value` is the agent's tmux pane id (what
@@ -2202,13 +2240,36 @@ function renderPrWidget(
   const entries = entriesForSession(loadRegistry(cwd), sessionId).filter((e) => e.depth === 1);
   if (entries.length === 0) return undefined;
 
+  // Compute live pane state once per pane — paneAlive/capturePane are expensive,
+  // and both the sort and the render loop below need it. Capture a wide tail so
+  // isWorkingSnapshot can find the activity line that sits above the input box
+  // (see WORKING_SCAN_LINES).
+  const aliveCache = new Map<string, boolean>();
+  const workingCache = new Map<string, boolean>();
+  const isAlive = (paneId: string): boolean => {
+    const cached = aliveCache.get(paneId);
+    if (cached !== undefined) return cached;
+    const v = paneAlive(paneId);
+    aliveCache.set(paneId, v);
+    return v;
+  };
+  const isWorking = (paneId: string): boolean => {
+    const cached = workingCache.get(paneId);
+    if (cached !== undefined) return cached;
+    const v = isWorkingSnapshot(capturePane(paneId, 40));
+    workingCache.set(paneId, v);
+    return v;
+  };
+
+  // Newest/most-active first; stopped & idle agents sink so recent work stays
+  // visible when the list truncates.
+  const sorted = sortPrEntriesForDisplay(entries, { isAlive, isWorking });
+
   const cap = Math.max(20, width - 1);
   const lines: string[] = [theme.fg("accent", `● PR agents (${entries.length})`)];
-  for (const e of entries) {
-    const alive = paneAlive(e.paneId);
-    // Capture a wide tail so isWorkingSnapshot can find the activity line that
-    // sits above the input box (see WORKING_SCAN_LINES).
-    const working = alive && isWorkingSnapshot(capturePane(e.paneId, 40));
+  for (const e of sorted) {
+    const alive = isAlive(e.paneId);
+    const working = alive && isWorking(e.paneId);
     const m = statusMarker(e.status, alive, working);
     const pr = e.prNumber !== undefined ? `PR #${e.prNumber} ${e.status}` : "pending";
     const head = `${theme.fg(m.color, m.icon)} ${theme.fg(m.color, m.label.padEnd(7))} ${e.id}  ${pr}  ${e.prName}`;
