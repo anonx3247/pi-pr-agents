@@ -14,6 +14,7 @@ import {
   capTail,
   classifyPrState,
   detectShell,
+  displayBucket,
   entriesForSession,
   extractFinalResult,
   findEntry,
@@ -32,6 +33,7 @@ import {
   selectStateTransitions,
   shq,
   slugify,
+  sortPrEntriesForDisplay,
   statusMarker,
   updateEntry,
   windowName,
@@ -365,6 +367,112 @@ describe("buildAgentPickerItems", () => {
   test("shows 'pending' when no PR number is recorded yet", () => {
     const items = buildAgentPickerItems([mk("a", "%1")], { isAlive: () => true, isWorking: () => false });
     assert.ok(items[0].label.includes("pending"));
+  });
+});
+
+describe("displayBucket", () => {
+  test("working live agents bucket first", () => {
+    assert.equal(displayBucket("working", true, true), 0);
+  });
+
+  test("live-but-idle agents bucket in the middle", () => {
+    assert.equal(displayBucket("open", true, false), 1);
+    assert.equal(displayBucket("working", true, false), 1);
+  });
+
+  test("terminal or dead agents sink to the bottom", () => {
+    assert.equal(displayBucket("merged", true, true), 2);
+    assert.equal(displayBucket("closed", true, false), 2);
+    assert.equal(displayBucket("stopped", false, false), 2);
+    assert.equal(displayBucket("working", false, false), 2);
+  });
+});
+
+describe("sortPrEntriesForDisplay", () => {
+  const mk = (id: string, paneId: string, createdAt: string, over: Partial<PrEntry> = {}): PrEntry =>
+    ({
+      id,
+      prName: `pr-${id}`,
+      branch: `branch-${id}`,
+      base: "main",
+      mode: "independent",
+      paneId,
+      worktree: `/wt/${id}`,
+      depth: 1,
+      parentId: "root",
+      status: "working",
+      createdAt,
+      ...over,
+    }) as PrEntry;
+
+  test("orders by bucket: working, then idle, then stopped", () => {
+    const entries = [
+      mk("stopped", "%dead", "2026-01-04T00:00:00Z", { status: "stopped" }),
+      mk("idle", "%idle", "2026-01-03T00:00:00Z"),
+      mk("working", "%work", "2026-01-01T00:00:00Z"),
+    ];
+    const sorted = sortPrEntriesForDisplay(entries, {
+      isAlive: (p) => p !== "%dead",
+      isWorking: (p) => p === "%work",
+    });
+    assert.deepEqual(
+      sorted.map((e) => e.id),
+      ["working", "idle", "stopped"],
+    );
+  });
+
+  test("within a bucket, newest createdAt sorts first", () => {
+    const entries = [
+      mk("old", "%1", "2026-01-01T00:00:00Z"),
+      mk("new", "%2", "2026-01-03T00:00:00Z"),
+      mk("mid", "%3", "2026-01-02T00:00:00Z"),
+    ];
+    const sorted = sortPrEntriesForDisplay(entries, { isAlive: () => true, isWorking: () => false });
+    assert.deepEqual(
+      sorted.map((e) => e.id),
+      ["new", "mid", "old"],
+    );
+  });
+
+  test("a newer stopped agent still sinks below an older working one", () => {
+    const entries = [
+      mk("new-stopped", "%dead", "2026-01-09T00:00:00Z", { status: "stopped" }),
+      mk("old-working", "%work", "2026-01-01T00:00:00Z"),
+    ];
+    const sorted = sortPrEntriesForDisplay(entries, {
+      isAlive: (p) => p !== "%dead",
+      isWorking: (p) => p === "%work",
+    });
+    assert.deepEqual(
+      sorted.map((e) => e.id),
+      ["old-working", "new-stopped"],
+    );
+  });
+
+  test("breaks createdAt ties by id and does not mutate input", () => {
+    const entries = [mk("b", "%1", "2026-01-01T00:00:00Z"), mk("a", "%2", "2026-01-01T00:00:00Z")];
+    const sorted = sortPrEntriesForDisplay(entries, { isAlive: () => true, isWorking: () => false });
+    assert.deepEqual(
+      sorted.map((e) => e.id),
+      ["b", "a"],
+    );
+    assert.deepEqual(
+      entries.map((e) => e.id),
+      ["b", "a"],
+    );
+  });
+
+  test("never probes working state of a dead pane", () => {
+    const entries = [mk("dead", "%dead", "2026-01-01T00:00:00Z", { status: "stopped" })];
+    let probed = false;
+    sortPrEntriesForDisplay(entries, {
+      isAlive: () => false,
+      isWorking: () => {
+        probed = true;
+        return true;
+      },
+    });
+    assert.equal(probed, false);
   });
 });
 
